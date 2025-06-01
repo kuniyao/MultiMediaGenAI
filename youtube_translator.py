@@ -4,6 +4,7 @@ from dotenv import load_dotenv # Added for .env
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
 import config # Added for config.py
 import google.generativeai as genai # Added for Gemini
+import time # Added for time.sleep if using batch delays
 
 def get_youtube_transcript(video_url_or_id):
     """
@@ -89,84 +90,185 @@ def format_time(seconds):
 
 def transcript_to_markdown(transcript_data, lang_code, source_type, video_id):
     """Converts transcript data to Markdown with timestamps."""
-    md_content = [f"# YouTube Video Transcript: {video_id}
-"]
+    md_content = [f"# YouTube Video Transcript: {video_id}\n"]
     md_content.append(f"**Source Language:** {lang_code}")
-    md_content.append(f"**Source Type:** {source_type} subtitles
-")
+    md_content.append(f"**Source Type:** {source_type} subtitles\n")
     
     for entry in transcript_data:
-        start_time = format_time(entry['start'])
+        start_time = format_time(entry.start)
         # Duration might not always be perfectly accurate for end time with some APIs,
         # but youtube-transcript-api provides start and duration.
-        end_time = format_time(entry['start'] + entry['duration'])
-        text = entry['text']
-        md_content.append(f"## {start_time} --> {end_time}
-{text}
-")
+        end_time = format_time(entry.start + entry.duration)
+        text = entry.text
+        md_content.append(f"## {start_time} --> {end_time}\n{text}\n")
     return "\n".join(md_content)
 
 def translate_text_segments(text_segments, target_language="zh-CN"):
     """
-    Placeholder for LLM translation.
-    This function should take a list of text segments and return a list of translated segments.
-    Replace this with your actual LLM API call.
-    This function should initialize the correct LLM client based on config.py
-    and use the appropriate API key loaded from .env
+    Translates a list of text segments using the configured LLM provider,
+    with a multi-level batching strategy for Gemini.
     """
     print(f"\n--- LLM Provider from config: {config.LLM_PROVIDER} ---")
-    translated_segments = []
+    translated_segments_final = []
 
     if config.LLM_PROVIDER == "gemini":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            print("Error: GEMINI_API_KEY not found in .env file or environment variables.")
-            print("Translation will be skipped.")
-            # Return original segments or empty, depending on desired error handling
-            return [f"[SKIPPED_NO_KEY] {s}" for s in text_segments] 
+            print("Error: GEMINI_API_KEY not found. Translation will be skipped.")
+            return [f"[SKIPPED_NO_KEY] {s}" for s in text_segments]
 
         try:
             genai.configure(api_key=api_key)
             model = genai.GenerativeModel(config.LLM_MODEL_GEMINI)
             print(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation to {target_language}.")
+            print(f"Primary batch char limit: {config.TARGET_INPUT_CHAR_LIMIT_PER_BATCH}, Fallback batch segments: {config.FALLBACK_BATCH_MAX_SEGMENTS}, Fallback char limit: {config.FALLBACK_BATCH_CHAR_LIMIT}")
+
+            # Helper function to attempt translation for a given batch of segments
+            def _translate_batch_attempt(batch_to_translate, batch_label="Primary Batch"):
+                if not batch_to_translate:
+                    return [], True # No segments, success (nothing to do)
+
+                print(f"Attempting {batch_label} of {len(batch_to_translate)} segments...")
+                batch_text_to_translate = config.SEGMENT_SEPARATOR.join(batch_to_translate)
+                
+                prompt = (
+                    f"You are a helpful translation assistant. Translate the following text segments from their original language to {target_language}. "
+                    f"The segments are separated by '{config.SEGMENT_SEPARATOR.strip()}'. "
+                    f"Please maintain the same number of segments in your output, using the exact same separator. "
+                    f"Each translated segment should correspond to its original segment. Do not add any extra explanatory text before or after the translated segments block."
+                    f"\n\nTEXT TO TRANSLATE:\n{batch_text_to_translate}"
+                )
+                try:
+                    response = model.generate_content(prompt)
+                    translated_batch_text = ""
+                    if response.parts:
+                        translated_batch_text = response.parts[0].text
+                    elif hasattr(response, 'text') and response.text:
+                        translated_batch_text = response.text
+                    else:
+                        print(f"Warning: No text returned for {batch_label}. Using original segments.")
+                        return [f"[NO_TRANSLATION_{batch_label.upper().replace(' ', '_')}] {s}" for s in batch_to_translate], False # Indicate failure
+
+                    translated_segments_from_batch = translated_batch_text.strip().split(config.SEGMENT_SEPARATOR)
+
+                    if len(translated_segments_from_batch) == len(batch_to_translate):
+                        print(f"{batch_label} translated successfully: {len(translated_segments_from_batch)} segments.")
+                        return translated_segments_from_batch, True # Success
+                    else:
+                        print(f"Warning: Mismatch in translated segments for {batch_label} (expected {len(batch_to_translate)}, got {len(translated_segments_from_batch)}). Response: '{translated_batch_text[:200]}...'")
+                        return None, False # Indicate failure, no segments returned directly for retry at this level
+                
+                except Exception as e_batch_attempt:
+                    print(f"An error occurred during {batch_label} Gemini translation: {e_batch_attempt}")
+                    return None, False # Indicate failure
+
+            # Helper function for final fallback: individual translation
+            def _translate_individually(segments_to_translate_individually, original_batch_label="Failed Batch"):
+                individual_translations = []
+                print(f"Falling back to individual translation for {len(segments_to_translate_individually)} segments from {original_batch_label}.")
+                for k_fallback, seg_to_translate in enumerate(segments_to_translate_individually):
+                    fallback_prompt = f"Translate the following text to {target_language}:\n\n\"{seg_to_translate}\""
+                    try:
+                        fallback_response = model.generate_content(fallback_prompt)
+                        if fallback_response.parts:
+                            individual_translations.append(fallback_response.parts[0].text)
+                        elif hasattr(fallback_response, 'text') and fallback_response.text:
+                            individual_translations.append(fallback_response.text)
+                        else:
+                            individual_translations.append(f"[NO_INDIVIDUAL_TRANSLATION] {seg_to_translate}")
+                    except Exception as e_individual:
+                        print(f"Error during individual fallback translation for segment: {e_individual}")
+                        individual_translations.append(f"[ERROR_INDIVIDUAL_TRANSLATING] {seg_to_translate}")
+                    if (k_fallback + 1) % 20 == 0 or (k_fallback + 1) == len(segments_to_translate_individually): # Log every 20 or at the end
+                         print(f"Individual fallback translated segment {k_fallback+1}/{len(segments_to_translate_individually)} of {original_batch_label}.")
+                return individual_translations
+
+            # Main batching loop
+            current_primary_batch = []
+            current_primary_batch_char_count = 0
+            total_segments = len(text_segments)
             
             for i, segment in enumerate(text_segments):
-                # Construct a clear prompt for translation
-                # You might want to refine this prompt for better results
-                prompt = f"Translate the following text to {target_language}:\n\n\"{segment}\""
+                segment_char_count = len(segment)
+                should_add_to_primary_batch = True
+                if current_primary_batch and (current_primary_batch_char_count + segment_char_count + len(config.SEGMENT_SEPARATOR) > config.TARGET_INPUT_CHAR_LIMIT_PER_BATCH):
+                    should_add_to_primary_batch = False
                 
-                # Add a small delay to avoid hitting rate limits too quickly if processing many segments.
-                # if i > 0 and i % 5 == 0: # Example: delay every 5 segments
-                #     print(f"Processed {i} segments, adding a small delay...")
-                #     time.sleep(1) # Requires `import time`
-                
-                response = model.generate_content(prompt)
-                
-                # Check if response has text. Gemini API might return parts.
-                if response.parts:
-                    translated_text = response.parts[0].text
-                elif hasattr(response, 'text') and response.text: # Fallback for older or different response structures
-                    translated_text = response.text
-                else:
-                    # Handle cases where the model might not return text (e.g. safety filters)
-                    print(f"Warning: No text returned for segment: '{segment[:50]}...'. Using original.")
-                    translated_text = f"[NO_TRANSLATION_RECEIVED] {segment}"
-                
-                translated_segments.append(translated_text)
-                if (i + 1) % 10 == 0 or (i + 1) == len(text_segments):
-                    print(f"Translated {i+1}/{len(text_segments)} segments...")
+                if should_add_to_primary_batch:
+                    current_primary_batch.append(segment)
+                    current_primary_batch_char_count += segment_char_count
+
+                if not should_add_to_primary_batch or (i == total_segments - 1):
+                    if not current_primary_batch:
+                        if not should_add_to_primary_batch: # Single large segment
+                             current_primary_batch.append(segment)
+                             current_primary_batch_char_count += segment_char_count
+                        else: # Empty list of segments to process
+                            continue 
+                    
+                    # Attempt 1: Primary large batch
+                    translated_slice, success = _translate_batch_attempt(current_primary_batch, "Primary Batch")
+
+                    if success:
+                        translated_segments_final.extend(translated_slice)
+                    else:
+                        # Attempt 2: Fallback to smaller batches
+                        print(f"Primary batch failed. Trying fallback with smaller batches for {len(current_primary_batch)} segments.")
+                        segments_from_failed_primary = list(current_primary_batch) # Make a copy
+                        
+                        current_fallback_batch = []
+                        current_fallback_batch_char_count = 0
+                        
+                        for j, fallback_segment in enumerate(segments_from_failed_primary):
+                            fallback_segment_char_count = len(fallback_segment)
+                            should_add_to_fallback_batch = True
+                            
+                            if current_fallback_batch and \
+                               ((len(current_fallback_batch) >= config.FALLBACK_BATCH_MAX_SEGMENTS) or \
+                                (current_fallback_batch_char_count + fallback_segment_char_count + len(config.SEGMENT_SEPARATOR) > config.FALLBACK_BATCH_CHAR_LIMIT)):
+                                should_add_to_fallback_batch = False
+
+                            if should_add_to_fallback_batch:
+                                current_fallback_batch.append(fallback_segment)
+                                current_fallback_batch_char_count += fallback_segment_char_count
+                            
+                            if not should_add_to_fallback_batch or (j == len(segments_from_failed_primary) - 1):
+                                if not current_fallback_batch:
+                                    if not should_add_to_fallback_batch: # Single large segment in fallback
+                                        current_fallback_batch.append(fallback_segment)
+                                        current_fallback_batch_char_count += fallback_segment_char_count
+                                    else:
+                                        continue
+
+                                fallback_translated_slice, fallback_success = _translate_batch_attempt(current_fallback_batch, "Fallback Batch")
+                                if fallback_success:
+                                    translated_segments_final.extend(fallback_translated_slice)
+                                else:
+                                    # Attempt 3: Final fallback to individual translation for this failed fallback_batch
+                                    individual_translations = _translate_individually(current_fallback_batch, "Failed Fallback Batch")
+                                    translated_segments_final.extend(individual_translations)
+                                
+                                current_fallback_batch = []
+                                current_fallback_batch_char_count = 0
+                                if not should_add_to_fallback_batch: # Add current segment to the next fallback batch
+                                    current_fallback_batch.append(fallback_segment)
+                                    current_fallback_batch_char_count += fallback_segment_char_count
+                                    
+                    # Reset for next primary batch
+                    current_primary_batch = []
+                    current_primary_batch_char_count = 0
+                    if not should_add_to_primary_batch: # Add current segment to the next primary batch
+                        current_primary_batch.append(segment)
+                        current_primary_batch_char_count += segment_char_count
             
-            print("--- Gemini translation complete ---")
-            return translated_segments
+            print(f"--- Gemini batch translation processing complete. Total translated segments: {len(translated_segments_final)} ---")
+            if len(translated_segments_final) != total_segments:
+                 print(f"Critical Warning: Final translated segment count ({len(translated_segments_final)}) MISMATCHES total original segments ({total_segments}).")
+            return translated_segments_final
 
         except Exception as e:
-            print(f"An error occurred during Gemini translation: {e}")
-            print("Translation will use placeholder for remaining segments or skip.")
-            # Fallback: return original text for untranslated parts or just what's been translated so far
-            # For simplicity, we'll mark untranslated ones and return what we have + placeholders
-            # A more robust solution might involve retries or more granular error handling.
-            remaining_segments = text_segments[len(translated_segments):]
-            return translated_segments + [f"[ERROR_TRANSLATING] {s}" for s in remaining_segments]
+            print(f"A critical error occurred during Gemini setup or outer processing loop: {e}")
+            return [f"[CRITICAL_ERROR_TRANSLATING] {s}" for s in text_segments]
 
     # Placeholder for OpenAI or other providers - you would add elif blocks here
     # elif config.LLM_PROVIDER == "openai":
@@ -177,11 +279,15 @@ def translate_text_segments(text_segments, target_language="zh-CN"):
         # Fallback to simulated translation if no provider is matched or configured
         print(f"Unsupported or misconfigured LLM_PROVIDER: {config.LLM_PROVIDER}. Using simulated translation.")
         print(f"--- Sending {len(text_segments)} segments for translation to {target_language} (SIMULATED) ---")
+        # Simulate segment-wise processing for consistency in logging
+        simulated_translated_segments = []
         for i, segment in enumerate(text_segments):
             translated_text = f"[译] {segment}" 
-            translated_segments.append(translated_text)
+            simulated_translated_segments.append(translated_text)
+            if (i + 1) % 100 == 0 or (i + 1) == len(text_segments): # Log every 100 or at the end
+                print(f"Simulated translation for {i+1}/{len(text_segments)} segments...")
         print("--- Simulated translation complete ---")
-        return translated_segments
+        return simulated_translated_segments
 
 def reconstruct_translated_srt(original_transcript_data, translated_texts):
     """Reconstructs SRT from original timestamps and translated texts."""
@@ -195,8 +301,8 @@ def reconstruct_translated_srt(original_transcript_data, translated_texts):
     min_len = min(len(original_transcript_data), len(translated_texts))
     for i in range(min_len):
         entry = original_transcript_data[i]
-        start_time = format_time(entry['start'])
-        end_time = format_time(entry['start'] + entry['duration'])
+        start_time = format_time(entry.start)
+        end_time = format_time(entry.start + entry.duration)
         text = translated_texts[i]
         srt_content.append(f"{i+1}\n{start_time} --> {end_time}\n{text}\n")
     return "\n".join(srt_content)
@@ -206,16 +312,15 @@ def reconstruct_translated_markdown(original_transcript_data, translated_texts, 
     if len(original_transcript_data) != len(translated_texts):
         print("Warning: Mismatch between original transcript entries and translated texts count during MD reconstruction.")
 
-    md_content = [f"# YouTube Video Translation: {video_id}
-"]
+    md_content = [f"# YouTube Video Translation: {video_id}\n"]
     md_content.append(f"**Original Language:** {original_lang} ({source_type})")
     md_content.append(f"**Translated Language:** {target_lang}\n")
     
     min_len = min(len(original_transcript_data), len(translated_texts))
     for i in range(min_len):
         entry = original_transcript_data[i]
-        start_time = format_time(entry['start'])
-        end_time = format_time(entry['start'] + entry['duration'])
+        start_time = format_time(entry.start)
+        end_time = format_time(entry.start + entry.duration)
         text = translated_texts[i]
         md_content.append(f"## {start_time} --> {end_time}\n{text}\n")
     return "\n".join(md_content)
@@ -266,7 +371,7 @@ def main():
     save_to_file(original_md, original_md_filename)
     
     # 2. Extract text segments for translation
-    text_segments_to_translate = [entry['text'] for entry in transcript_data]
+    text_segments_to_translate = [entry.text for entry in transcript_data]
     
     # 3. Translate (using placeholder)
     print(f"\nStarting translation to {args.target_lang}...")
