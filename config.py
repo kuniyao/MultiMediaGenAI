@@ -40,3 +40,20 @@ FALLBACK_BATCH_CHAR_LIMIT = 15000  # Approx char limit for a fallback batch
 # Placeholder for future batching/rate-limiting settings for LLM calls
 # LLM_BATCH_SIZE = 5 # Number of segments to translate per API call
 # LLM_REQUEST_DELAY = 1 # Seconds to wait between batch API calls
+
+# === New Configurations for Transcript Segment Merging ===
+# Maximum duration in seconds for a merged transcript segment.
+MERGE_MAX_DURATION_SECONDS = 10.0
+
+# Maximum character length for a merged transcript segment.
+MERGE_MAX_CHAR_LENGTH = 120 # Increased slightly for more context
+
+# Punctuation marks that strongly indicate the end of a sentence.
+# Used to decide if a segment should be finalized even if below max length/duration.
+# Includes both full-width (Chinese, Japanese) and half-width (English) punctuations.
+SENTENCE_END_PUNCTUATIONS = ['。', '？', '！', '.', '?', '!']
+
+# Punctuation marks that indicate a sub-clause or a pause within a sentence.
+# If a segment ends with one of these, the script will be more inclined to merge
+# it with the next segment, provided it doesn't exceed other limits.
+SUB_CLAUSE_PUNCTUATIONS = ['，', ',', '、', '；', ';', '：', ':']

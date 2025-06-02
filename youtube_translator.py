@@ -88,18 +88,151 @@ def format_time(seconds):
     seconds %= 60
     return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
 
+def preprocess_and_merge_segments(raw_transcript_data):
+    """
+    Merges raw transcript segments based on duration, length, and punctuation.
+    Also cleans up newlines within segments.
+    """
+    if not raw_transcript_data:
+        return []
+
+    # --- Pass 1: Initial Cleaning from API data --- 
+    initial_cleaned_entries = []
+    for entry_obj in raw_transcript_data: # entry_obj is FetchedTranscriptSnippet here
+        cleaned_text = entry_obj.text.replace('\n', ' ').strip()
+        if cleaned_text:
+            initial_cleaned_entries.append({
+                'text': cleaned_text,
+                'start': entry_obj.start,    
+                'duration': entry_obj.duration,
+                'original_text_length': len(cleaned_text) # Store original length for proportional duration later
+            })
+
+    if not initial_cleaned_entries:
+        return []
+    
+    print(f"\n--- Starting Pre-segmentation and Merging Logic ---")
+    print(f"Pass 1: Initial cleaning complete. {len(initial_cleaned_entries)} entries.")
+
+    # --- Pass 2: Pre-splitting entries with internal punctuations --- 
+    fine_grained_entries = []
+    print(f"\nPass 2: Pre-splitting entries with internal punctuations...")
+    for i, entry_dict in enumerate(initial_cleaned_entries):
+        text_to_process = entry_dict['text']
+        original_start_time = entry_dict['start']
+        original_duration = entry_dict['duration']
+        original_text_len = entry_dict['original_text_length'] # Should be len(text_to_process) initially
+        if original_text_len == 0: continue # Should not happen if cleaned_text was checked
+
+        current_sub_segment_start_time = original_start_time
+        processed_chars_in_original_entry = 0
+
+        print(f"  Pre-splitting original entry {i}: '{text_to_process[:100]}...'")
+
+        while text_to_process:
+            found_punc_at = -1
+            # Find the *first* sentence-ending punctuation from the start of text_to_process
+            for punc_char_idx, char_in_text in enumerate(text_to_process):
+                if char_in_text in config.SENTENCE_END_PUNCTUATIONS:
+                    found_punc_at = punc_char_idx
+                    break
+            
+            if found_punc_at != -1:
+                sub_segment_text = text_to_process[:found_punc_at + 1]
+                len_sub_segment = len(sub_segment_text)
+                # Estimate duration proportionally to the original segment's duration
+                # This is an estimate; final segment duration is recalculated later.
+                estimated_duration = (len_sub_segment / original_text_len) * original_duration
+                
+                fine_grained_entries.append({
+                    'text': sub_segment_text,
+                    'start': current_sub_segment_start_time,
+                    'duration': estimated_duration
+                })
+                print(f"    Split internal: '{sub_segment_text}' (est. dur: {estimated_duration:.2f}s)")
+                current_sub_segment_start_time += estimated_duration
+                processed_chars_in_original_entry += len_sub_segment 
+                text_to_process = text_to_process[found_punc_at + 1:].lstrip() # Process remainder
+            else:
+                # No more sentence-ending punctuations in the remainder of this original entry
+                if text_to_process: # If there's any text left
+                    remaining_len = len(text_to_process)
+                    # Estimate duration for the remainder
+                    estimated_duration = (remaining_len / original_text_len) * original_duration
+                    # Ensure total duration of pieces doesn't wildly exceed original from this one entry
+                    # This is tricky; a simpler approach is to just use proportional as well, or remaining original duration. 
+                    # For now, proportional. The main merge logic re-calculates final segment duration.
+
+                    fine_grained_entries.append({
+                        'text': text_to_process,
+                        'start': current_sub_segment_start_time,
+                        'duration': estimated_duration 
+                    })
+                    print(f"    Split remainder: '{text_to_process}' (est. dur: {estimated_duration:.2f}s)")
+                text_to_process = "" # All processed for this original entry
+        
+    print(f"Pass 2: Pre-splitting complete. {len(fine_grained_entries)} fine-grained entries generated.")
+
+    # --- Pass 3: Merge fine-grained entries based ONLY on SENTENCE_END_PUNCTUATIONS at the very end --- 
+    print(f"\nPass 3: Merging fine-grained entries (Punctuation ONLY at end of accumulation)...")
+    print(f"Configured Sentence End Punctuations: {config.SENTENCE_END_PUNCTUATIONS}\n")
+
+    final_merged_segments = []
+    current_accumulated_fine_grained_entries = [] 
+
+    for i, fg_entry_dict in enumerate(fine_grained_entries):
+        current_accumulated_fine_grained_entries.append(fg_entry_dict)
+        current_segment_text = " ".join(e['text'] for e in current_accumulated_fine_grained_entries)
+
+        print(f"  Pass 3 - Processing fine-grained entry {i+1}/{len(fine_grained_entries)}. Accumulating: '{fg_entry_dict['text']}'")
+        print(f"    Current Segment Text (so far): '{current_segment_text[:150]}...'")
+
+        if current_segment_text and current_segment_text[-1] in config.SENTENCE_END_PUNCTUATIONS:
+            segment_start_time = current_accumulated_fine_grained_entries[0]['start']
+            segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
+            segment_duration = segment_end_time - segment_start_time
+            
+            final_merged_segments.append({
+                'text': current_segment_text,
+                'start': segment_start_time,
+                'duration': segment_duration
+            })
+            print(f"      >>> Segment finalized by punctuation ('{current_segment_text[-1]}'): '{current_segment_text}'")
+            print(f"          Duration: {segment_duration:.2f}s, Start: {segment_start_time:.2f}s, End: {segment_end_time:.2f}s")
+            current_accumulated_fine_grained_entries = [] 
+        else:
+            print(f"      Segment continues (last char '{current_segment_text[-1] if current_segment_text else "N/A"}' not in end punctuations).")
+
+    if current_accumulated_fine_grained_entries:
+        print(f"\n  Pass 3 - Finalizing remaining accumulated fine-grained entries as the last segment.")
+        segment_text = " ".join(e['text'] for e in current_accumulated_fine_grained_entries)
+        segment_start_time = current_accumulated_fine_grained_entries[0]['start']
+        segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
+        segment_duration = segment_end_time - segment_start_time
+        
+        final_merged_segments.append({
+            'text': segment_text,
+            'start': segment_start_time,
+            'duration': segment_duration
+        })
+        print(f"      >>> Last segment (no trailing punctuation): '{segment_text}'")
+        print(f"          Duration: {segment_duration:.2f}s, Start: {segment_start_time:.2f}s, End: {segment_end_time:.2f}s")
+    
+    print(f"\n--- Pre-segmentation and Merging Logic Finished. Total segments: {len(final_merged_segments)} ---")
+    return final_merged_segments
+
 def transcript_to_markdown(transcript_data, lang_code, source_type, video_id):
-    """Converts transcript data to Markdown with timestamps."""
+    """Converts transcript data (list of dicts) to Markdown with timestamps."""
     md_content = [f"# YouTube Video Transcript: {video_id}\n"]
     md_content.append(f"**Source Language:** {lang_code}")
     md_content.append(f"**Source Type:** {source_type} subtitles\n")
     
     for entry in transcript_data:
-        start_time = format_time(entry.start)
+        start_time = format_time(entry['start'])
         # Duration might not always be perfectly accurate for end time with some APIs,
         # but youtube-transcript-api provides start and duration.
-        end_time = format_time(entry.start + entry.duration)
-        text = entry.text
+        end_time = format_time(entry['start'] + entry['duration'])
+        text = entry['text']
         md_content.append(f"## {start_time} --> {end_time}\n{text}\n")
     return "\n".join(md_content)
 
@@ -301,14 +434,14 @@ def reconstruct_translated_srt(original_transcript_data, translated_texts):
     min_len = min(len(original_transcript_data), len(translated_texts))
     for i in range(min_len):
         entry = original_transcript_data[i]
-        start_time = format_time(entry.start)
-        end_time = format_time(entry.start + entry.duration)
+        start_time = format_time(entry['start'])
+        end_time = format_time(entry['start'] + entry['duration'])
         text = translated_texts[i]
         srt_content.append(f"{i+1}\n{start_time} --> {end_time}\n{text}\n")
     return "\n".join(srt_content)
 
 def reconstruct_translated_markdown(original_transcript_data, translated_texts, original_lang, source_type, target_lang="zh-CN", video_id=""):
-    """Reconstructs Markdown from original timestamps and translated texts."""
+    """Reconstructs Markdown from original timestamps (list of dicts) and translated texts."""
     if len(original_transcript_data) != len(translated_texts):
         print("Warning: Mismatch between original transcript entries and translated texts count during MD reconstruction.")
 
@@ -319,8 +452,8 @@ def reconstruct_translated_markdown(original_transcript_data, translated_texts, 
     min_len = min(len(original_transcript_data), len(translated_texts))
     for i in range(min_len):
         entry = original_transcript_data[i]
-        start_time = format_time(entry.start)
-        end_time = format_time(entry.start + entry.duration)
+        start_time = format_time(entry['start'])
+        end_time = format_time(entry['start'] + entry['duration'])
         text = translated_texts[i]
         md_content.append(f"## {start_time} --> {end_time}\n{text}\n")
     return "\n".join(md_content)
@@ -357,23 +490,46 @@ def main():
     base_filename = args.output_basename if args.output_basename else video_id
 
     print(f"Processing video: {video_id} (from input: {args.video_url_or_id})")
-    transcript_data, lang_code, source_type = get_youtube_transcript(video_id)
+    raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id)
 
-    if not transcript_data:
+    if not raw_transcript_data:
         print("Could not retrieve transcript. Exiting.")
         return
 
-    print(f"Successfully fetched transcript in '{lang_code}' ({source_type}).")
+    print(f"Successfully fetched raw transcript in '{lang_code}' ({source_type}). Original segment count: {len(raw_transcript_data)}.")
 
-    # 1. Original Markdown with timestamps
-    original_md = transcript_to_markdown(transcript_data, lang_code, source_type, video_id)
-    original_md_filename = f"{base_filename}_original_{lang_code}.md"
+    # --- New: Preprocess and merge transcript segments ---
+    print("Preprocessing and merging transcript segments...")
+    # The preprocess_and_merge_segments function will use 'config' directly as it's in the same module.
+    merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data)
+    
+    if not merged_transcript_data:
+        print("Transcript data is empty after preprocessing and merging. Exiting.")
+        return
+    print(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
+
+    # Use the merged data for all subsequent operations
+    transcript_data_for_processing = merged_transcript_data
+    # --- End of new preprocessing step ---
+
+    # 1. Original Markdown with timestamps (now uses merged data)
+    # The content of this file is now from the merged segments.
+    original_md = transcript_to_markdown(transcript_data_for_processing, lang_code, source_type, video_id)
+    # Update filename to reflect that the content is based on merged segments
+    original_md_filename = f"{base_filename}_original_merged_{lang_code}.md"
     save_to_file(original_md, original_md_filename)
     
-    # 2. Extract text segments for translation
-    text_segments_to_translate = [entry.text for entry in transcript_data]
+    # --- MODIFICATION: Skip translation and subsequent steps ---
+    print("\nSkipping translation and generation of translated files as per request.")
+    print(f"Original merged transcript (MD) saved to: {original_md_filename}")
+    print("\nProcessing finished up to the original merged Markdown generation.")
+    return # Exit main function early
+    # --- END OF MODIFICATION ---
+
+    # 2. Extract text segments for translation (from merged data)
+    text_segments_to_translate = [entry['text'] for entry in transcript_data_for_processing]
     
-    # 3. Translate (using placeholder)
+    # 3. Translate
     print(f"\nStarting translation to {args.target_lang}...")
     translated_texts = translate_text_segments(text_segments_to_translate, args.target_lang)
 
@@ -386,12 +542,12 @@ def main():
 
     # 4. Reconstruct translated Markdown
     translated_md_filename = f"{base_filename}_translated_{args.target_lang}.md"
-    translated_md_content = reconstruct_translated_markdown(transcript_data, translated_texts, lang_code, source_type, args.target_lang, video_id)
+    translated_md_content = reconstruct_translated_markdown(transcript_data_for_processing, translated_texts, lang_code, source_type, args.target_lang, video_id)
     save_to_file(translated_md_content, translated_md_filename)
 
     # 5. Reconstruct translated SRT
     translated_srt_filename = f"{base_filename}_translated_{args.target_lang}.srt"
-    translated_srt_content = reconstruct_translated_srt(transcript_data, translated_texts)
+    translated_srt_content = reconstruct_translated_srt(transcript_data_for_processing, translated_texts)
     save_to_file(translated_srt_content, translated_srt_filename)
 
     print("\nAll tasks completed!")
