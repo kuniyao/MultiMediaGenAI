@@ -5,6 +5,8 @@ from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, Tran
 import config # Added for config.py
 import google.generativeai as genai # Added for Gemini
 import time # Added for time.sleep if using batch delays
+import json # Added for new translation flow
+import re # For normalizing timestamp IDs
 
 def get_youtube_transcript(video_url_or_id):
     """
@@ -111,29 +113,63 @@ def preprocess_and_merge_segments(raw_transcript_data):
     if not initial_cleaned_entries:
         return []
     
+    # --- Helper function to check for actual sentence ending (handles decimals and common host/file patterns) ---
+    def _is_actual_sentence_end_char(text_segment, char_index_in_segment, sentence_end_punctuations_config):
+        char_to_check = text_segment[char_index_in_segment]
+
+        if char_to_check == '.':
+            # Rule 1: Decimal point detection (e.g., "2.5", ".5")
+            is_prev_digit = (char_index_in_segment > 0 and text_segment[char_index_in_segment - 1].isdigit())
+            is_next_digit = (char_index_in_segment < len(text_segment) - 1 and text_segment[char_index_in_segment + 1].isdigit())
+            
+            if is_prev_digit and is_next_digit: # e.g., "2.5"
+                return False 
+            if not is_prev_digit and is_next_digit: # e.g., ".5"
+                if not (char_index_in_segment > 0 and text_segment[char_index_in_segment - 1] == '.'):
+                    return False 
+
+            prev_char_is_alnum = (char_index_in_segment > 0 and text_segment[char_index_in_segment - 1].isalnum())
+            next_char_is_alnum = (char_index_in_segment < len(text_segment) - 1 and text_segment[char_index_in_segment + 1].isalnum())
+
+            if prev_char_is_alnum and next_char_is_alnum:
+                idx_after_alnum_dot_alnum = char_index_in_segment + 2 
+                
+                if idx_after_alnum_dot_alnum < len(text_segment) -1:
+                    if text_segment[idx_after_alnum_dot_alnum] == ' ' and text_segment[idx_after_alnum_dot_alnum + 1].isupper():
+                        return True 
+                    else:
+                        return False 
+                else:
+                    return False 
+
+            return True
+            
+        elif char_to_check in sentence_end_punctuations_config: 
+            return True
+            
+        return False
+    # --- End of Helper --- 
+
     print(f"\n--- Starting Pre-segmentation and Merging Logic ---")
     print(f"Pass 1: Initial cleaning complete. {len(initial_cleaned_entries)} entries.")
 
     # --- Pass 2: Pre-splitting entries with internal punctuations --- 
     fine_grained_entries = []
-    print(f"\nPass 2: Pre-splitting entries with internal punctuations...")
     for i, entry_dict in enumerate(initial_cleaned_entries):
         text_to_process = entry_dict['text']
         original_start_time = entry_dict['start']
         original_duration = entry_dict['duration']
-        original_text_len = entry_dict['original_text_length'] # Should be len(text_to_process) initially
-        if original_text_len == 0: continue # Should not happen if cleaned_text was checked
+        original_text_len = entry_dict['original_text_length']
+        if original_text_len == 0: continue
 
         current_sub_segment_start_time = original_start_time
-        processed_chars_in_original_entry = 0
-
-        print(f"  Pre-splitting original entry {i}: '{text_to_process[:100]}...'")
 
         while text_to_process:
             found_punc_at = -1
             # Find the *first* sentence-ending punctuation from the start of text_to_process
             for punc_char_idx, char_in_text in enumerate(text_to_process):
-                if char_in_text in config.SENTENCE_END_PUNCTUATIONS:
+                # Use the helper function here
+                if _is_actual_sentence_end_char(text_to_process, punc_char_idx, config.SENTENCE_END_PUNCTUATIONS):
                     found_punc_at = punc_char_idx
                     break
             
@@ -149,9 +185,7 @@ def preprocess_and_merge_segments(raw_transcript_data):
                     'start': current_sub_segment_start_time,
                     'duration': estimated_duration
                 })
-                print(f"    Split internal: '{sub_segment_text}' (est. dur: {estimated_duration:.2f}s)")
                 current_sub_segment_start_time += estimated_duration
-                processed_chars_in_original_entry += len_sub_segment 
                 text_to_process = text_to_process[found_punc_at + 1:].lstrip() # Process remainder
             else:
                 # No more sentence-ending punctuations in the remainder of this original entry
@@ -168,7 +202,6 @@ def preprocess_and_merge_segments(raw_transcript_data):
                         'start': current_sub_segment_start_time,
                         'duration': estimated_duration 
                     })
-                    print(f"    Split remainder: '{text_to_process}' (est. dur: {estimated_duration:.2f}s)")
                 text_to_process = "" # All processed for this original entry
         
     print(f"Pass 2: Pre-splitting complete. {len(fine_grained_entries)} fine-grained entries generated.")
@@ -184,10 +217,7 @@ def preprocess_and_merge_segments(raw_transcript_data):
         current_accumulated_fine_grained_entries.append(fg_entry_dict)
         current_segment_text = " ".join(e['text'] for e in current_accumulated_fine_grained_entries)
 
-        print(f"  Pass 3 - Processing fine-grained entry {i+1}/{len(fine_grained_entries)}. Accumulating: '{fg_entry_dict['text']}'")
-        print(f"    Current Segment Text (so far): '{current_segment_text[:150]}...'")
-
-        if current_segment_text and current_segment_text[-1] in config.SENTENCE_END_PUNCTUATIONS:
+        if current_segment_text and _is_actual_sentence_end_char(current_segment_text, len(current_segment_text)-1, config.SENTENCE_END_PUNCTUATIONS):
             segment_start_time = current_accumulated_fine_grained_entries[0]['start']
             segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
             segment_duration = segment_end_time - segment_start_time
@@ -197,11 +227,9 @@ def preprocess_and_merge_segments(raw_transcript_data):
                 'start': segment_start_time,
                 'duration': segment_duration
             })
-            print(f"      >>> Segment finalized by punctuation ('{current_segment_text[-1]}'): '{current_segment_text}'")
-            print(f"          Duration: {segment_duration:.2f}s, Start: {segment_start_time:.2f}s, End: {segment_end_time:.2f}s")
             current_accumulated_fine_grained_entries = [] 
         else:
-            print(f"      Segment continues (last char '{current_segment_text[-1] if current_segment_text else "N/A"}' not in end punctuations).")
+            pass # Explicitly passing if no action needed
 
     if current_accumulated_fine_grained_entries:
         print(f"\n  Pass 3 - Finalizing remaining accumulated fine-grained entries as the last segment.")
@@ -215,8 +243,6 @@ def preprocess_and_merge_segments(raw_transcript_data):
             'start': segment_start_time,
             'duration': segment_duration
         })
-        print(f"      >>> Last segment (no trailing punctuation): '{segment_text}'")
-        print(f"          Duration: {segment_duration:.2f}s, Start: {segment_start_time:.2f}s, End: {segment_end_time:.2f}s")
     
     print(f"\n--- Pre-segmentation and Merging Logic Finished. Total segments: {len(final_merged_segments)} ---")
     return final_merged_segments
@@ -236,189 +262,256 @@ def transcript_to_markdown(transcript_data, lang_code, source_type, video_id):
         md_content.append(f"## {start_time} --> {end_time}\n{text}\n")
     return "\n".join(md_content)
 
-def translate_text_segments(text_segments, target_language="zh-CN"):
+def _parse_time_part(time_str_part):
+    """Helper to parse a single time string like HH:MM:SS,ms or MM:SS,ms etc."""
+    h, m, s, ms = 0, 0, 0, 0
+    try:
+        main_and_ms = time_str_part.split(',')
+        if len(main_and_ms) != 2:
+            # print(f"DEBUG: _parse_time_part: Invalid main/ms split for '{time_str_part}'")
+            return None
+        ms = int(main_and_ms[1])
+        
+        hms_parts = main_and_ms[0].split(':')
+        if len(hms_parts) == 3: # HH:MM:SS
+            h = int(hms_parts[0])
+            m = int(hms_parts[1])
+            s = int(hms_parts[2])
+        elif len(hms_parts) == 2: # MM:SS
+            m = int(hms_parts[0])
+            s = int(hms_parts[1])
+        elif len(hms_parts) == 1: # SS
+            s = int(hms_parts[0])
+        else:
+            # print(f"DEBUG: _parse_time_part: Invalid h/m/s part count for '{main_and_ms[0]}'")
+            return None
+        
+        # Basic validation for parsed values (optional, but good practice)
+        if not (0 <= h <= 99 and 0 <= m <= 59 and 0 <= s <= 59 and 0 <= ms <= 999):
+            # print(f"DEBUG: _parse_time_part: Parsed time values out of range for '{time_str_part}'")
+            return None
+            
+        return h, m, s, ms
+    except ValueError:
+        # print(f"DEBUG: _parse_time_part: ValueError during int conversion for '{time_str_part}'")
+        return None
+    except Exception as e:
+        # print(f"DEBUG: _parse_time_part: Generic error for '{time_str_part}': {e}")
+        return None
+
+def _normalize_timestamp_id(id_str):
+    """Normalizes a timestamp ID string like 'HH:MM:SS,ms --> HH:MM:SS,ms' to a consistent format."""
+    if not id_str or not isinstance(id_str, str):
+        return f"ERROR_NORM_INVALID_INPUT_TYPE__{id_str}"
+    
+    id_str_stripped = id_str.strip()
+    parts = id_str_stripped.split("-->")
+    if len(parts) != 2:
+        return f"ERROR_NORM_NO_ARROW_SEPARATOR__{id_str_stripped}"
+        
+    start_parsed = _parse_time_part(parts[0].strip())
+    end_parsed = _parse_time_part(parts[1].strip())
+    
+    if not start_parsed:
+        return f"ERROR_NORM_START_PARSE_FAILED__{id_str_stripped}"
+    if not end_parsed:
+        return f"ERROR_NORM_END_PARSE_FAILED__{id_str_stripped}"
+        
+    sh, sm, ss, sms = start_parsed
+    eh, em, es, ems = end_parsed
+    
+    return (f"{sh:02d}:{sm:02d}:{ss:02d},{sms:03d} --> "
+            f"{eh:02d}:{em:02d}:{es:02d},{ems:03d}")
+
+def translate_text_segments(transcript_data_processed, 
+                            source_lang_code, 
+                            target_lang="zh-CN"):
     """
-    Translates a list of text segments using the configured LLM provider,
-    with a multi-level batching strategy for Gemini.
+    Translates a list of processed transcript segments (with text, start, duration)
+    using the configured LLM provider, via batched JSON objects.
     """
     print(f"\n--- LLM Provider from config: {config.LLM_PROVIDER} ---")
-    translated_segments_final = []
+    
+    if not transcript_data_processed:
+        print("No segments to translate.")
+        return []
+
+    json_segments_to_translate = []
+    for item in transcript_data_processed:
+        original_raw_id = format_time(item['start']) + " --> " + format_time(item['start'] + item['duration'])
+        json_segments_to_translate.append({
+            "id": original_raw_id, 
+            "text_en": item['text'] 
+        })
+
+    translations_map = {} 
 
     if config.LLM_PROVIDER == "gemini":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
             print("Error: GEMINI_API_KEY not found. Translation will be skipped.")
-            return [f"[SKIPPED_NO_KEY] {s}" for s in text_segments]
+            return [f"[SKIPPED_NO_KEY] {s['text_en']}" for s in json_segments_to_translate]
 
         try:
             genai.configure(api_key=api_key)
-            model = genai.GenerativeModel(config.LLM_MODEL_GEMINI)
-            print(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation to {target_language}.")
-            print(f"Primary batch char limit: {config.TARGET_INPUT_CHAR_LIMIT_PER_BATCH}, Fallback batch segments: {config.FALLBACK_BATCH_MAX_SEGMENTS}, Fallback char limit: {config.FALLBACK_BATCH_CHAR_LIMIT}")
+            generation_config = genai.types.GenerationConfig(
+                response_mime_type="application/json" 
+            )
+            model = genai.GenerativeModel(
+                config.LLM_MODEL_GEMINI,
+                generation_config=generation_config
+            ) 
+            print(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode)." )
+            print(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
 
-            # Helper function to attempt translation for a given batch of segments
-            def _translate_batch_attempt(batch_to_translate, batch_label="Primary Batch"):
-                if not batch_to_translate:
-                    return [], True # No segments, success (nothing to do)
+            output_text_field_key = f"text_{target_lang.lower().replace('-', '_')}" 
 
-                print(f"Attempting {batch_label} of {len(batch_to_translate)} segments...")
-                batch_text_to_translate = config.SEGMENT_SEPARATOR.join(batch_to_translate)
+            def _construct_prompt_string_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key):
+                example_id_format = "HH:MM:SS,mmm --> HH:MM:SS,mmm (e.g., '00:01:23,456 --> 00:01:25,789')"
+                instruction_text_for_payload = (
+                    f"Objective: Translate the 'text_en' field of each segment object from {src_lang} to {tgt_lang}. "
+                    f"Output Format: A JSON object with a single key 'translated_segments'. This key's value must be an array of objects. "
+                    f"Each object in this output array must retain the original 'id' from the input segment and include the translated text in a new field named '{out_text_key}'."
+                    f"CRITICAL ID PRESERVATION: The 'id' field is a precise timestamp string (format: {example_id_format}). "
+                    f"You MUST return this 'id' string EXACTLY as it was provided in the input for each segment. DO NOT alter, reformat, or change any part of the 'id' string, including numbers, colons, commas, spaces, or the '-->' separator. "
+                    "The segments are ordered chronologically and provide context for each other. "
+                    "Ensure the number of objects in the 'translated_segments' array exactly matches the number of input segments."
+                )
+                json_payload_for_prompt = {
+                    "source_language": src_lang,
+                    "target_language": tgt_lang,
+                    "instructions": instruction_text_for_payload, 
+                    "segments": segments_list_for_payload
+                }
+                return (
+                    f"Your task is to process the following JSON request. The 'instructions' field within the JSON details the primary objective: "
+                    f"to translate text segments from {src_lang} to {tgt_lang}. "
+                    "You MUST return a single, valid JSON object that strictly follows the output structure described in the 'instructions' field of the request. "
+                    "Pay EXTREME ATTENTION to the ID PRESERVATION requirement detailed in the instructions: the 'id' field for each segment in your response MUST be an IDENTICAL, UNCHANGED copy of the 'id' field from the input segment.\\n\\n"
+                    f"JSON Request:\\n```json\\n{json.dumps(json_payload_for_prompt, indent=2, ensure_ascii=False)}\\n```"
+                )
+
+            all_batches = []
+            current_batch_input_segments = [] 
+
+            for seg_obj in json_segments_to_translate:
+                potential_segments_for_this_batch = current_batch_input_segments + [seg_obj]
                 
-                prompt = (
-                    f"You are a helpful translation assistant. Translate the following text segments from their original language to {target_language}. "
-                    f"The segments are separated by '{config.SEGMENT_SEPARATOR.strip()}'. "
-                    f"Please maintain the same number of segments in your output, using the exact same separator. "
-                    f"Each translated segment should correspond to its original segment. Do not add any extra explanatory text before or after the translated segments block."
-                    f"\n\nTEXT TO TRANSLATE:\n{batch_text_to_translate}"
+                prompt_if_added = _construct_prompt_string_for_batch(
+                    potential_segments_for_this_batch, 
+                    source_lang_code, 
+                    target_lang, 
+                    output_text_field_key
                 )
                 try:
-                    response = model.generate_content(prompt)
-                    translated_batch_text = ""
-                    if response.parts:
-                        translated_batch_text = response.parts[0].text
-                    elif hasattr(response, 'text') and response.text:
-                        translated_batch_text = response.text
+                    num_tokens_if_added = model.count_tokens(prompt_if_added).total_tokens
+                except Exception as e_count:
+                    print(f"  Warning: Token counting failed for a potential batch. Error: {e_count}. Proceeding with segment count only for this decision.")
+                    if len(potential_segments_for_this_batch) > 10: 
+                         num_tokens_if_added = config.TARGET_PROMPT_TOKENS_PER_BATCH + 1 
                     else:
-                        print(f"Warning: No text returned for {batch_label}. Using original segments.")
-                        return [f"[NO_TRANSLATION_{batch_label.upper().replace(' ', '_')}] {s}" for s in batch_to_translate], False # Indicate failure
+                         num_tokens_if_added = 1 
 
-                    translated_segments_from_batch = translated_batch_text.strip().split(config.SEGMENT_SEPARATOR)
-
-                    if len(translated_segments_from_batch) == len(batch_to_translate):
-                        print(f"{batch_label} translated successfully: {len(translated_segments_from_batch)} segments.")
-                        return translated_segments_from_batch, True # Success
-                    else:
-                        print(f"Warning: Mismatch in translated segments for {batch_label} (expected {len(batch_to_translate)}, got {len(translated_segments_from_batch)}). Response: '{translated_batch_text[:200]}...'")
-                        return None, False # Indicate failure, no segments returned directly for retry at this level
-                
-                except Exception as e_batch_attempt:
-                    print(f"An error occurred during {batch_label} Gemini translation: {e_batch_attempt}")
-                    return None, False # Indicate failure
-
-            # Helper function for final fallback: individual translation
-            def _translate_individually(segments_to_translate_individually, original_batch_label="Failed Batch"):
-                individual_translations = []
-                print(f"Falling back to individual translation for {len(segments_to_translate_individually)} segments from {original_batch_label}.")
-                for k_fallback, seg_to_translate in enumerate(segments_to_translate_individually):
-                    fallback_prompt = f"Translate the following text to {target_language}:\n\n\"{seg_to_translate}\""
-                    try:
-                        fallback_response = model.generate_content(fallback_prompt)
-                        if fallback_response.parts:
-                            individual_translations.append(fallback_response.parts[0].text)
-                        elif hasattr(fallback_response, 'text') and fallback_response.text:
-                            individual_translations.append(fallback_response.text)
-                        else:
-                            individual_translations.append(f"[NO_INDIVIDUAL_TRANSLATION] {seg_to_translate}")
-                    except Exception as e_individual:
-                        print(f"Error during individual fallback translation for segment: {e_individual}")
-                        individual_translations.append(f"[ERROR_INDIVIDUAL_TRANSLATING] {seg_to_translate}")
-                    if (k_fallback + 1) % 20 == 0 or (k_fallback + 1) == len(segments_to_translate_individually): # Log every 20 or at the end
-                         print(f"Individual fallback translated segment {k_fallback+1}/{len(segments_to_translate_individually)} of {original_batch_label}.")
-                return individual_translations
-
-            # Main batching loop
-            current_primary_batch = []
-            current_primary_batch_char_count = 0
-            total_segments = len(text_segments)
-            
-            for i, segment in enumerate(text_segments):
-                segment_char_count = len(segment)
-                should_add_to_primary_batch = True
-                if current_primary_batch and (current_primary_batch_char_count + segment_char_count + len(config.SEGMENT_SEPARATOR) > config.TARGET_INPUT_CHAR_LIMIT_PER_BATCH):
-                    should_add_to_primary_batch = False
-                
-                if should_add_to_primary_batch:
-                    current_primary_batch.append(segment)
-                    current_primary_batch_char_count += segment_char_count
-
-                if not should_add_to_primary_batch or (i == total_segments - 1):
-                    if not current_primary_batch:
-                        if not should_add_to_primary_batch: # Single large segment
-                             current_primary_batch.append(segment)
-                             current_primary_batch_char_count += segment_char_count
-                        else: # Empty list of segments to process
-                            continue 
+                if current_batch_input_segments and \
+                   (num_tokens_if_added > config.TARGET_PROMPT_TOKENS_PER_BATCH or \
+                    len(potential_segments_for_this_batch) > config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH):
                     
-                    # Attempt 1: Primary large batch
-                    translated_slice, success = _translate_batch_attempt(current_primary_batch, "Primary Batch")
-
-                    if success:
-                        translated_segments_final.extend(translated_slice)
-                    else:
-                        # Attempt 2: Fallback to smaller batches
-                        print(f"Primary batch failed. Trying fallback with smaller batches for {len(current_primary_batch)} segments.")
-                        segments_from_failed_primary = list(current_primary_batch) # Make a copy
-                        
-                        current_fallback_batch = []
-                        current_fallback_batch_char_count = 0
-                        
-                        for j, fallback_segment in enumerate(segments_from_failed_primary):
-                            fallback_segment_char_count = len(fallback_segment)
-                            should_add_to_fallback_batch = True
-                            
-                            if current_fallback_batch and \
-                               ((len(current_fallback_batch) >= config.FALLBACK_BATCH_MAX_SEGMENTS) or \
-                                (current_fallback_batch_char_count + fallback_segment_char_count + len(config.SEGMENT_SEPARATOR) > config.FALLBACK_BATCH_CHAR_LIMIT)):
-                                should_add_to_fallback_batch = False
-
-                            if should_add_to_fallback_batch:
-                                current_fallback_batch.append(fallback_segment)
-                                current_fallback_batch_char_count += fallback_segment_char_count
-                            
-                            if not should_add_to_fallback_batch or (j == len(segments_from_failed_primary) - 1):
-                                if not current_fallback_batch:
-                                    if not should_add_to_fallback_batch: # Single large segment in fallback
-                                        current_fallback_batch.append(fallback_segment)
-                                        current_fallback_batch_char_count += fallback_segment_char_count
-                                    else:
-                                        continue
-
-                                fallback_translated_slice, fallback_success = _translate_batch_attempt(current_fallback_batch, "Fallback Batch")
-                                if fallback_success:
-                                    translated_segments_final.extend(fallback_translated_slice)
-                                else:
-                                    # Attempt 3: Final fallback to individual translation for this failed fallback_batch
-                                    individual_translations = _translate_individually(current_fallback_batch, "Failed Fallback Batch")
-                                    translated_segments_final.extend(individual_translations)
-                                
-                                current_fallback_batch = []
-                                current_fallback_batch_char_count = 0
-                                if not should_add_to_fallback_batch: # Add current segment to the next fallback batch
-                                    current_fallback_batch.append(fallback_segment)
-                                    current_fallback_batch_char_count += fallback_segment_char_count
-                                    
-                    # Reset for next primary batch
-                    current_primary_batch = []
-                    current_primary_batch_char_count = 0
-                    if not should_add_to_primary_batch: # Add current segment to the next primary batch
-                        current_primary_batch.append(segment)
-                        current_primary_batch_char_count += segment_char_count
+                    all_batches.append(list(current_batch_input_segments))
+                    current_batch_input_segments = [seg_obj]
+                else:
+                    current_batch_input_segments.append(seg_obj)
             
-            print(f"--- Gemini batch translation processing complete. Total translated segments: {len(translated_segments_final)} ---")
-            if len(translated_segments_final) != total_segments:
-                 print(f"Critical Warning: Final translated segment count ({len(translated_segments_final)}) MISMATCHES total original segments ({total_segments}).")
-            return translated_segments_final
+            if current_batch_input_segments:
+                all_batches.append(list(current_batch_input_segments))
 
+            print(f"Prepared {len(json_segments_to_translate)} segments into {len(all_batches)} batches for translation based on token/segment limits.")
+
+            for batch_idx, actual_batch_segments in enumerate(all_batches):
+                if not actual_batch_segments:
+                    continue
+                print(f"Translating Batch {batch_idx + 1}/{len(all_batches)} with {len(actual_batch_segments)} segments...")
+
+                prompt_to_send = _construct_prompt_string_for_batch(
+                    actual_batch_segments, 
+                    source_lang_code, 
+                    target_lang, 
+                    output_text_field_key
+                )
+                
+                try:
+                    response = model.generate_content(prompt_to_send)
+                    if not response.parts:
+                         print(f"  Warning: Gemini response for batch {batch_idx+1} has no parts. Using originals.")
+                         for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_EMPTY_RESPONSE] {seg['text_en']}"
+                         continue
+                    try:
+                        translated_json_str = response.text 
+                        translated_data = json.loads(translated_json_str)
+                        if 'translated_segments' not in translated_data or not isinstance(translated_data['translated_segments'], list):
+                            print(f"  Warning: 'translated_segments' array not found/invalid in response for batch {batch_idx+1}. Raw: {translated_json_str[:200]}... Using originals.")
+                            for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_BAD_JSON_STRUCTURE] {seg['text_en']}"
+                            continue
+                        translated_batch_segments_from_response = translated_data['translated_segments']
+                        if len(translated_batch_segments_from_response) != len(actual_batch_segments):
+                            print(f"  Warning: Mismatch in translated segments for batch {batch_idx+1} (expected {len(actual_batch_segments)}, got {len(translated_batch_segments_from_response)}). Using originals for this batch.")
+                            for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_SEG_COUNT_MISMATCH] {seg['text_en']}"
+                            continue
+                        
+                        for original_seg, translated_seg_item in zip(actual_batch_segments, translated_batch_segments_from_response):
+                            original_id_strict = original_seg["id"]
+                            translated_id_from_model = translated_seg_item.get("id")
+
+                            if not translated_id_from_model:
+                                print(f"  Warning: ID missing in translated segment for original ID '{original_id_strict}' in batch {batch_idx+1}. Skipping.")
+                                translations_map[original_id_strict] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {original_seg['text_en']}"
+                                continue
+
+                            normalized_translated_id = _normalize_timestamp_id(translated_id_from_model)
+                            
+                            if original_id_strict != normalized_translated_id:
+                                print(f"  Warning: ID mismatch after attempting to normalize model response. Batch {batch_idx+1}.\n     Original (Strict): '{original_id_strict}'\n     Model Output Raw : '{translated_id_from_model}'\n     Model OutputNormd: '{normalized_translated_id}'. Skipping segment.")
+                                translations_map[original_id_strict] = f"[NO_TRANSLATION_ID_MISMATCH_NORM_FAILED_OR_VALUE_DIFF] {original_seg['text_en']}"
+                                continue
+                            
+                            if output_text_field_key not in translated_seg_item:
+                                print(f"  Warning: Expected field '{output_text_field_key}' not found for ID '{original_id_strict}' in batch {batch_idx+1}. Using original.")
+                                translations_map[original_id_strict] = f"[NO_TRANSLATION_MISSING_TEXT_FIELD] {original_seg['text_en']}"
+                                continue
+                            translations_map[original_id_strict] = translated_seg_item[output_text_field_key]
+                        print(f"  Batch {batch_idx + 1} translated successfully.")
+                    except json.JSONDecodeError as e_json:
+                        print(f"  Error decoding JSON response from Gemini for batch {batch_idx+1}: {e_json}. Raw: {response.text[:500] if response.text else 'EMPTY'}")
+                        for seg in actual_batch_segments: translations_map[seg["id"]] = f"[ERROR_JSON_DECODE] {seg['text_en']}"
+                    except Exception as e_resp_proc:
+                        print(f"  Error processing response from Gemini for batch {batch_idx+1}: {e_resp_proc}")
+                        for seg in actual_batch_segments: translations_map[seg["id"]] = f"[ERROR_RESP_PROCESSING] {seg['text_en']}"
+                except Exception as e_api_call:
+                    print(f"  An error occurred during Gemini API call for batch {batch_idx+1}: {e_api_call}. This might be due to the batch size exceeding model limits even after token counting.")
+                    for seg in actual_batch_segments: translations_map[seg["id"]] = f"[ERROR_API_CALL] {seg['text_en']}"
+                
+                delay_seconds = getattr(config, 'LLM_REQUEST_DELAY', 0)
+                if delay_seconds > 0 and batch_idx < len(all_batches) - 1 :
+                    print(f"  Waiting for {delay_seconds}s before next batch...")
+                    time.sleep(delay_seconds)
+
+            final_translated_texts = []
+            for seg_obj_orig in json_segments_to_translate:
+                final_translated_texts.append(translations_map.get(seg_obj_orig["id"], f"[TRANSLATION_NOT_FOUND] {seg_obj_orig['text_en']}"))
+            
+            if len(final_translated_texts) != len(json_segments_to_translate):
+                 print(f"Critical Warning: Final translated segment count ({len(final_translated_texts)}) MISMATCHES original segment count ({len(json_segments_to_translate)}).")
+            
+            print(f"--- Gemini JSON translation processing complete. ---")
+            return final_translated_texts
         except Exception as e:
-            print(f"A critical error occurred during Gemini setup or outer processing loop: {e}")
-            return [f"[CRITICAL_ERROR_TRANSLATING] {s}" for s in text_segments]
-
-    # Placeholder for OpenAI or other providers - you would add elif blocks here
-    # elif config.LLM_PROVIDER == "openai":
-    #     # ... OpenAI specific logic ...
-    #     pass
-
+            print(f"A critical error occurred during Gemini JSON setup or outer processing loop: {e}")
+            return [f"[CRITICAL_ERROR_TRANSLATING] {s['text_en']}" for s in json_segments_to_translate]
     else:
-        # Fallback to simulated translation if no provider is matched or configured
         print(f"Unsupported or misconfigured LLM_PROVIDER: {config.LLM_PROVIDER}. Using simulated translation.")
-        print(f"--- Sending {len(text_segments)} segments for translation to {target_language} (SIMULATED) ---")
-        # Simulate segment-wise processing for consistency in logging
         simulated_translated_segments = []
-        for i, segment in enumerate(text_segments):
-            translated_text = f"[译] {segment}" 
+        for seg_obj in json_segments_to_translate: 
+            translated_text = f"[译] {seg_obj['text_en']}" 
             simulated_translated_segments.append(translated_text)
-            if (i + 1) % 100 == 0 or (i + 1) == len(text_segments): # Log every 100 or at the end
-                print(f"Simulated translation for {i+1}/{len(text_segments)} segments...")
         print("--- Simulated translation complete ---")
         return simulated_translated_segments
 
@@ -478,74 +571,55 @@ def main():
     parser = argparse.ArgumentParser(description="Translate YouTube video subtitles.")
     parser.add_argument("video_url_or_id", help="The URL or ID of the YouTube video.")
     parser.add_argument("--output_basename", help="Basename for output files (e.g., 'my_video'). Defaults to video ID.", default=None)
-    # Use default target language from config
     parser.add_argument("--target_lang", help="Target language for translation (e.g., 'zh-CN', 'zh-Hans').", default=config.DEFAULT_TARGET_TRANSLATION_LANGUAGE)
-
     args = parser.parse_args()
-    
-    # Load environment variables from .env file
     load_dotenv()
-
     video_id = get_video_id(args.video_url_or_id)
     base_filename = args.output_basename if args.output_basename else video_id
-
     print(f"Processing video: {video_id} (from input: {args.video_url_or_id})")
     raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id)
-
     if not raw_transcript_data:
         print("Could not retrieve transcript. Exiting.")
         return
-
     print(f"Successfully fetched raw transcript in '{lang_code}' ({source_type}). Original segment count: {len(raw_transcript_data)}.")
-
-    # --- New: Preprocess and merge transcript segments ---
     print("Preprocessing and merging transcript segments...")
-    # The preprocess_and_merge_segments function will use 'config' directly as it's in the same module.
     merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data)
-    
     if not merged_transcript_data:
         print("Transcript data is empty after preprocessing and merging. Exiting.")
         return
     print(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
-
-    # Use the merged data for all subsequent operations
     transcript_data_for_processing = merged_transcript_data
-    # --- End of new preprocessing step ---
-
-    # 1. Original Markdown with timestamps (now uses merged data)
-    # The content of this file is now from the merged segments.
     original_md = transcript_to_markdown(transcript_data_for_processing, lang_code, source_type, video_id)
-    # Update filename to reflect that the content is based on merged segments
     original_md_filename = f"{base_filename}_original_merged_{lang_code}.md"
     save_to_file(original_md, original_md_filename)
     
-    # --- MODIFICATION: Skip translation and subsequent steps ---
-    print("\nSkipping translation and generation of translated files as per request.")
-    print(f"Original merged transcript (MD) saved to: {original_md_filename}")
-    print("\nProcessing finished up to the original merged Markdown generation.")
-    return # Exit main function early
+    # --- MODIFICATION: Temporarily comment out/remove skip for testing translation ---
+    # print("\nSkipping translation and generation of translated files as per request.")
+    # print(f"Original merged transcript (MD) saved to: {original_md_filename}")
+    # print("\nProcessing finished up to the original merged Markdown generation.")
+    # return # Exit main function early
     # --- END OF MODIFICATION ---
 
-    # 2. Extract text segments for translation (from merged data)
-    text_segments_to_translate = [entry['text'] for entry in transcript_data_for_processing]
+    # 2. Text segments for translation are now implicitly handled by new translate_text_segments
     
     # 3. Translate
-    print(f"\nStarting translation to {args.target_lang}...")
-    translated_texts = translate_text_segments(text_segments_to_translate, args.target_lang)
+    print(f"\nStarting translation from '{lang_code}' to '{args.target_lang}' using new JSON method...")
+    translated_texts = translate_text_segments(
+        transcript_data_for_processing, 
+        lang_code,                      
+        args.target_lang                
+    )
 
-    if not translated_texts : # Basic check, real LLM might return empty for some inputs
-        print("Translation (simulated) failed or returned no segments. Exiting.")
+    if not translated_texts :
+        print("Translation failed or returned no segments. Exiting.")
         return
-    if len(translated_texts) != len(text_segments_to_translate):
-         print(f"Warning: Number of translated segments ({len(translated_texts)}) does not match original ({len(text_segments_to_translate)}). Results might be incomplete or misaligned.")
+    if len(translated_texts) != len(transcript_data_for_processing):
+         print(f"Warning: Number of translated segments ({len(translated_texts)}) does not match original ({len(transcript_data_for_processing)}). Results might be incomplete or misaligned.")
 
-
-    # 4. Reconstruct translated Markdown
     translated_md_filename = f"{base_filename}_translated_{args.target_lang}.md"
     translated_md_content = reconstruct_translated_markdown(transcript_data_for_processing, translated_texts, lang_code, source_type, args.target_lang, video_id)
     save_to_file(translated_md_content, translated_md_filename)
 
-    # 5. Reconstruct translated SRT
     translated_srt_filename = f"{base_filename}_translated_{args.target_lang}.srt"
     translated_srt_content = reconstruct_translated_srt(transcript_data_for_processing, translated_texts)
     save_to_file(translated_srt_content, translated_srt_filename)
