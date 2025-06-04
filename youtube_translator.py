@@ -80,15 +80,26 @@ def get_youtube_transcript(video_url_or_id):
         print(f"An error occurred while fetching transcript for {video_id}: {e}")
         return None, None, None
 
-def format_time(seconds):
+def format_time(seconds_val):
     """Converts seconds to SRT time format (HH:MM:SS,ms)"""
-    millis = int(round((seconds - int(seconds)) * 1000))
-    seconds = int(seconds)
-    hours = seconds // 3600
-    seconds %= 3600
-    minutes = seconds // 60
-    seconds %= 60
-    return f"{hours:02d}:{minutes:02d}:{seconds:02d},{millis:03d}"
+    # Separate integer and fractional parts of seconds
+    integer_seconds = int(seconds_val)
+    fractional_seconds = seconds_val - integer_seconds
+
+    # Calculate milliseconds, round, and handle carry-over to seconds
+    millis = int(round(fractional_seconds * 1000))
+
+    if millis >= 1000:
+        integer_seconds += millis // 1000  # Add carried-over second(s)
+        millis %= 1000                     # Remainder is the new milliseconds
+
+    # Calculate HH, MM, SS from the (potentially adjusted) integer_seconds
+    hours = integer_seconds // 3600
+    remainder_after_hours = integer_seconds % 3600
+    minutes = remainder_after_hours // 60
+    final_seconds_part = remainder_after_hours % 60
+    
+    return f"{hours:02d}:{minutes:02d}:{final_seconds_part:02d},{millis:03d}"
 
 def preprocess_and_merge_segments(raw_transcript_data):
     """
@@ -355,25 +366,38 @@ def translate_text_segments(transcript_data_processed,
         try:
             genai.configure(api_key=api_key)
             generation_config = genai.types.GenerationConfig(
-                response_mime_type="application/json" 
+                response_mime_type="application/json",
+                temperature=0.0
             )
             model = genai.GenerativeModel(
                 config.LLM_MODEL_GEMINI,
                 generation_config=generation_config
             ) 
-            print(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode)." )
+            print(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode, temperature=0.0)." )
             print(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
 
             output_text_field_key = f"text_{target_lang.lower().replace('-', '_')}" 
 
-            def _construct_prompt_string_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key):
-                example_id_format = "HH:MM:SS,mmm --> HH:MM:SS,mmm (e.g., '00:01:23,456 --> 00:01:25,789')"
+            def _construct_prompt_string_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key, use_simplified_ids=False):
+                if use_simplified_ids:
+                    example_id_format = "seg_N (e.g., 'seg_0', 'seg_1', ... 'seg_99')"
+                    id_preservation_instruction = (
+                        f"CRITICAL ID PRESERVATION: The 'id' field is a simplified segment identifier (format: {example_id_format}). "
+                        f"You MUST return this 'id' string EXACTLY as it was provided in the input for each segment. DO NOT alter or omit the 'id'. "
+                        "The 'id' ensures segments are correctly mapped back after translation."
+                    )
+                else: # Original behavior
+                    example_id_format = "HH:MM:SS,mmm --> HH:MM:SS,mmm (e.g., '00:01:23,456 --> 00:01:25,789')"
+                    id_preservation_instruction = (
+                        f"CRITICAL ID PRESERVATION: The 'id' field is a precise timestamp string (format: {example_id_format}). "
+                        f"You MUST return this 'id' string EXACTLY as it was provided in the input for each segment. DO NOT alter, reformat, or change any part of the 'id' string, including numbers, colons, commas, spaces, or the '-->' separator. "
+                    )
+                
                 instruction_text_for_payload = (
                     f"Objective: Translate the 'text_en' field of each segment object from {src_lang} to {tgt_lang}. "
                     f"Output Format: A JSON object with a single key 'translated_segments'. This key's value must be an array of objects. "
                     f"Each object in this output array must retain the original 'id' from the input segment and include the translated text in a new field named '{out_text_key}'."
-                    f"CRITICAL ID PRESERVATION: The 'id' field is a precise timestamp string (format: {example_id_format}). "
-                    f"You MUST return this 'id' string EXACTLY as it was provided in the input for each segment. DO NOT alter, reformat, or change any part of the 'id' string, including numbers, colons, commas, spaces, or the '-->' separator. "
+                    f"{id_preservation_instruction} " # Use the chosen instruction
                     "The segments are ordered chronologically and provide context for each other. "
                     "Ensure the number of objects in the 'translated_segments' array exactly matches the number of input segments."
                 )
@@ -394,14 +418,25 @@ def translate_text_segments(transcript_data_processed,
             all_batches = []
             current_batch_input_segments = [] 
 
+            # Flag to control the ID strategy
+            USE_SIMPLIFIED_IDS_EXPERIMENTAL = True
+            if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
+                print("INFO: Using SIMPLIFIED IDs (seg_N) for translation batches.")
+
             for seg_obj in json_segments_to_translate:
                 potential_segments_for_this_batch = current_batch_input_segments + [seg_obj]
                 
+                # Token counting prompt generation will use original IDs for now.
+                # This is a slight overestimation if simplified IDs are shorter, which is generally safe.
+                # To be extremely precise, this prompt construction would also need to be aware of USE_SIMPLIFIED_IDS_EXPERIMENTAL
+                # and create a temporary list with simplified IDs for counting if that flag is True.
+                # For now, we keep it as is, as the impact is likely small.
                 prompt_if_added = _construct_prompt_string_for_batch(
                     potential_segments_for_this_batch, 
                     source_lang_code, 
                     target_lang, 
-                    output_text_field_key
+                    output_text_field_key,
+                    use_simplified_ids=False # For token counting, assume original ID format complexity
                 )
                 try:
                     num_tokens_if_added = model.count_tokens(prompt_if_added).total_tokens
@@ -431,11 +466,22 @@ def translate_text_segments(transcript_data_processed,
                     continue
                 print(f"Translating Batch {batch_idx + 1}/{len(all_batches)} with {len(actual_batch_segments)} segments...")
 
+                segments_for_payload_this_batch = []
+                if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
+                    for i, seg_data in enumerate(actual_batch_segments):
+                        segments_for_payload_this_batch.append({
+                            "id": f"seg_{i}",
+                            "text_en": seg_data["text_en"]
+                        })
+                else:
+                    segments_for_payload_this_batch = actual_batch_segments # Use as is
+
                 prompt_to_send = _construct_prompt_string_for_batch(
-                    actual_batch_segments, 
+                    segments_for_payload_this_batch, 
                     source_lang_code, 
                     target_lang, 
-                    output_text_field_key
+                    output_text_field_key,
+                    use_simplified_ids=USE_SIMPLIFIED_IDS_EXPERIMENTAL # Pass the flag
                 )
                 
                 try:
@@ -457,37 +503,58 @@ def translate_text_segments(transcript_data_processed,
                             for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_SEG_COUNT_MISMATCH] {seg['text_en']}"
                             continue
                         
-                        for original_seg, translated_seg_item in zip(actual_batch_segments, translated_batch_segments_from_response):
-                            original_id_strict = original_seg["id"]
-                            translated_id_from_model = translated_seg_item.get("id")
-
-                            if not translated_id_from_model:
-                                print(f"  Warning: ID missing in translated segment for original ID '{original_id_strict}' in batch {batch_idx+1}. Skipping.")
-                                translations_map[original_id_strict] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {original_seg['text_en']}"
-                                continue
-
-                            normalized_translated_id = _normalize_timestamp_id(translated_id_from_model)
+                        # Revised loop for processing translated segments
+                        for i, translated_seg_item in enumerate(translated_batch_segments_from_response):
+                            original_complex_id_from_actual_batch = actual_batch_segments[i]["id"]
+                            text_en_from_actual_batch = actual_batch_segments[i]["text_en"]
                             
-                            if original_id_strict != normalized_translated_id:
-                                print(f"  Warning: ID mismatch after attempting to normalize model response. Batch {batch_idx+1}.\n     Original (Strict): '{original_id_strict}'\n     Model Output Raw : '{translated_id_from_model}'\n     Model OutputNormd: '{normalized_translated_id}'. Skipping segment.")
-                                translations_map[original_id_strict] = f"[NO_TRANSLATION_ID_MISMATCH_NORM_FAILED_OR_VALUE_DIFF] {original_seg['text_en']}"
-                                continue
+                            map_key = _normalize_timestamp_id(original_complex_id_from_actual_batch)
+
+                            if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
+                                expected_simple_id = f"seg_{i}"
+                                model_returned_simple_id = translated_seg_item.get("id")
+
+                                if not model_returned_simple_id:
+                                    print(f"  Warning: ID missing in translated segment. Batch {batch_idx+1}. Expected simple ID '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}'). Skipping.")
+                                    translations_map[map_key] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {text_en_from_actual_batch}"
+                                    continue
+                                if model_returned_simple_id != expected_simple_id:
+                                    print(f"  Warning: Simple ID mismatch from model. Batch {batch_idx+1}.\\n     Expected: '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}')\\n     Model Returned: '{model_returned_simple_id}'. Skipping.")
+                                    translations_map[map_key] = f"[NO_TRANSLATION_SIMPLE_ID_MISMATCH] {text_en_from_actual_batch}"
+                                    continue
+                                # If we are here, simple ID from model is correct and matches expected.
+                            else: # Original (complex) ID logic
+                                translated_id_from_model = translated_seg_item.get("id")
+                                if not translated_id_from_model:
+                                    print(f"  Warning: ID missing in translated segment for original ID '{original_complex_id_from_actual_batch}' in batch {batch_idx+1}. Skipping.")
+                                    translations_map[map_key] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {text_en_from_actual_batch}"
+                                    continue
+
+                                normalized_translated_id = _normalize_timestamp_id(translated_id_from_model)
+                                
+                                if map_key != normalized_translated_id: # map_key is already the normalized original complex ID
+                                    print(f"  Warning: ID mismatch after attempting to normalize model response. Batch {batch_idx+1}.\\n     Original (Normalized): '{map_key}'\\n     Model Output Raw : '{translated_id_from_model}'\\n     Model OutputNormd: '{normalized_translated_id}'. Skipping segment.")
+                                    translations_map[map_key] = f"[NO_TRANSLATION_ID_MISMATCH_NORM_FAILED_OR_VALUE_DIFF] {text_en_from_actual_batch}"
+                                    continue
                             
+                            # Common logic for checking text field and storing translation
                             if output_text_field_key not in translated_seg_item:
-                                print(f"  Warning: Expected field '{output_text_field_key}' not found for ID '{original_id_strict}' in batch {batch_idx+1}. Using original.")
-                                translations_map[original_id_strict] = f"[NO_TRANSLATION_MISSING_TEXT_FIELD] {original_seg['text_en']}"
+                                id_for_error_msg = f"seg_{i}" if USE_SIMPLIFIED_IDS_EXPERIMENTAL else original_complex_id_from_actual_batch
+                                print(f"  Warning: Expected field '{output_text_field_key}' not found for ID '{id_for_error_msg}' in batch {batch_idx+1}. Using original.")
+                                translations_map[map_key] = f"[NO_TRANSLATION_MISSING_TEXT_FIELD] {text_en_from_actual_batch}"
                                 continue
-                            translations_map[original_id_strict] = translated_seg_item[output_text_field_key]
+                            
+                            translations_map[map_key] = translated_seg_item[output_text_field_key]
                         print(f"  Batch {batch_idx + 1} translated successfully.")
                     except json.JSONDecodeError as e_json:
                         print(f"  Error decoding JSON response from Gemini for batch {batch_idx+1}: {e_json}. Raw: {response.text[:500] if response.text else 'EMPTY'}")
-                        for seg in actual_batch_segments: translations_map[seg["id"]] = f"[ERROR_JSON_DECODE] {seg['text_en']}"
+                        for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_JSON_DECODE] {seg['text_en']}"
                     except Exception as e_resp_proc:
                         print(f"  Error processing response from Gemini for batch {batch_idx+1}: {e_resp_proc}")
-                        for seg in actual_batch_segments: translations_map[seg["id"]] = f"[ERROR_RESP_PROCESSING] {seg['text_en']}"
+                        for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_RESP_PROCESSING] {seg['text_en']}"
                 except Exception as e_api_call:
                     print(f"  An error occurred during Gemini API call for batch {batch_idx+1}: {e_api_call}. This might be due to the batch size exceeding model limits even after token counting.")
-                    for seg in actual_batch_segments: translations_map[seg["id"]] = f"[ERROR_API_CALL] {seg['text_en']}"
+                    for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_API_CALL] {seg['text_en']}"
                 
                 delay_seconds = getattr(config, 'LLM_REQUEST_DELAY', 0)
                 if delay_seconds > 0 and batch_idx < len(all_batches) - 1 :
@@ -496,7 +563,19 @@ def translate_text_segments(transcript_data_processed,
 
             final_translated_texts = []
             for seg_obj_orig in json_segments_to_translate:
-                final_translated_texts.append(translations_map.get(seg_obj_orig["id"], f"[TRANSLATION_NOT_FOUND] {seg_obj_orig['text_en']}"))
+                # Normalize the ID from the original segment list before looking up in the map
+                normalized_key_to_lookup = _normalize_timestamp_id(seg_obj_orig["id"])
+                
+                # Prepare a more informative default message if translation is not found
+                default_not_found_message = (
+                    f"[TRANSLATION_NOT_FOUND_FOR_ID:{seg_obj_orig['id']}] "
+                    f"[NORMALIZED_AS:{normalized_key_to_lookup}] "
+                    f"{seg_obj_orig['text_en']}"
+                )
+
+                final_translated_texts.append(
+                    translations_map.get(normalized_key_to_lookup, default_not_found_message)
+                )
             
             if len(final_translated_texts) != len(json_segments_to_translate):
                  print(f"Critical Warning: Final translated segment count ({len(final_translated_texts)}) MISMATCHES original segment count ({len(json_segments_to_translate)}).")
