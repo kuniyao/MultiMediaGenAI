@@ -8,7 +8,7 @@ from dotenv import load_dotenv # Added for .env
 # pytubefix import should be here if not already present from previous steps
 from pytubefix import YouTube # Make sure this line is present and correct
 
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript
 # from pytube import YouTube # Commented out original pytube import
 import shutil # Added for safe filename
 import config # Added for config.py
@@ -17,6 +17,7 @@ import time # Added for time.sleep if using batch delays
 import json # Added for new translation flow
 import re # For normalizing timestamp IDs
 import string # Added for sanitize_filename
+import xml.etree.ElementTree as ET # Added for specific exception handling
 
 # --- Global Logger for general script messages (console output) ---
 global_logger = logging.getLogger("GlobalYoutubeTranslator")
@@ -26,6 +27,7 @@ console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - GLOBAL - %(
 console_handler.setFormatter(console_formatter)
 if not global_logger.handlers:
     global_logger.addHandler(console_handler)
+global_logger.propagate = False # Prevent messages from being passed to the root logger
 # --- End of Global Logger Setup ---
 
 def setup_video_logger(logger_name, log_file_path, level=logging.INFO):
@@ -54,8 +56,11 @@ def get_youtube_transcript(video_url_or_id, logger=None):
     Fetches the transcript for a given YouTube video ID or URL.
     Prioritizes manually created transcripts, then falls back to generated ones.
     Languages are prioritized based on config.py, then any available.
+    Includes a retry mechanism for fetching.
     """
     logger_to_use = logger if logger else global_logger
+    max_retries = 2  # Retry up to 2 times after the initial attempt (total 3 attempts)
+    retry_delay_seconds = 5 
 
     video_id = video_url_or_id
     if "youtube.com/watch?v=" in video_url_or_id:
@@ -63,71 +68,97 @@ def get_youtube_transcript(video_url_or_id, logger=None):
     elif "youtu.be/" in video_url_or_id:
         video_id = video_url_or_id.split("youtu.be/")[1].split("?")[0]
 
-    try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
-        
-        # Use preferred languages from config
-        preferred_langs = config.PREFERRED_TRANSCRIPT_LANGUAGES
-        logger_to_use.info(f"Attempting to find manual transcript in preferred languages: {preferred_langs} for video {video_id}")
+    last_exception = None # To store the last exception if all retries fail
 
-        # Try manual transcript in preferred languages
-        for lang in preferred_langs:
-            try:
-                transcript = transcript_list.find_manually_created_transcript([lang])
-                logger_to_use.info(f"Found manually created transcript in '{lang}' for video {video_id}.")
-                return transcript.fetch(), lang, "manual"
-            except NoTranscriptFound:
-                continue
-        logger_to_use.info(f"No manually created transcript found in preferred languages for video {video_id}.")
+    for attempt in range(max_retries + 1):
+        try:
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+            
+            preferred_langs = config.PREFERRED_TRANSCRIPT_LANGUAGES
+            if attempt == 0: # Log initial attempt only once
+                logger_to_use.info(f"Attempting to find manual transcript in preferred languages: {preferred_langs} for video {video_id}")
 
-        # Try generated transcript in preferred languages
-        logger_to_use.info(f"Attempting to find auto-generated transcript in preferred languages: {preferred_langs} for video {video_id}")
-        for lang in preferred_langs:
-            try:
-                transcript = transcript_list.find_generated_transcript([lang])
-                logger_to_use.info(f"Found auto-generated transcript in '{lang}' for video {video_id}.")
-                return transcript.fetch(), lang, "generated"
-            except NoTranscriptFound:
-                continue
-        logger_to_use.info(f"No auto-generated transcript found in preferred languages for video {video_id}.")
+            for lang in preferred_langs:
+                try:
+                    transcript = transcript_list.find_manually_created_transcript([lang])
+                    logger_to_use.info(f"Found manually created transcript in '{lang}' for video {video_id}.")
+                    return transcript.fetch(), lang, "manual" # Attempt to fetch
+                except NoTranscriptFound:
+                    continue
+            if attempt == 0:
+                 logger_to_use.info(f"No manually created transcript found in preferred languages for video {video_id}.")
 
-        # If not found in preferred languages, try any manual transcript
-        available_manual = transcript_list._manually_created_transcripts
-        if available_manual:
-            first_available_manual_lang = list(available_manual.keys())[0]
-            logger_to_use.info(f"Attempting to find first available manual transcript ('{first_available_manual_lang}') for video {video_id}.")
-            try:
-                transcript = transcript_list.find_manually_created_transcript([first_available_manual_lang])
-                logger_to_use.info(f"Found manually created transcript in '{first_available_manual_lang}' (first available) for video {video_id}.")
-                return transcript.fetch(), first_available_manual_lang, "manual"
-            except NoTranscriptFound: # Should not happen if key exists
-                logger_to_use.warning(f"Key '{first_available_manual_lang}' existed in available_manual but NoTranscriptFound was raised.", exc_info=True)
-                pass 
-        logger_to_use.info(f"No manually created transcript found in any language for video {video_id}.")
+            if attempt == 0:
+                logger_to_use.info(f"Attempting to find auto-generated transcript in preferred languages: {preferred_langs} for video {video_id}")
+            for lang in preferred_langs:
+                try:
+                    transcript = transcript_list.find_generated_transcript([lang])
+                    logger_to_use.info(f"Found auto-generated transcript in '{lang}' for video {video_id}.")
+                    return transcript.fetch(), lang, "generated" # Attempt to fetch
+                except NoTranscriptFound:
+                    continue
+            if attempt == 0:
+                logger_to_use.info(f"No auto-generated transcript found in preferred languages for video {video_id}.")
 
-        # If no manual transcript, try any generated transcript
-        available_generated = transcript_list._generated_transcripts
-        if available_generated:
-            first_available_generated_lang = list(available_generated.keys())[0]
-            logger_to_use.info(f"Attempting to find first available auto-generated transcript ('{first_available_generated_lang}') for video {video_id}.")
-            try:
-                transcript = transcript_list.find_generated_transcript([first_available_generated_lang])
-                logger_to_use.info(f"Found auto-generated transcript in '{first_available_generated_lang}' (first available) for video {video_id}.")
-                return transcript.fetch(), first_available_generated_lang, "generated"
-            except NoTranscriptFound: # Should not happen
-                 logger_to_use.warning(f"Key '{first_available_generated_lang}' existed in available_generated but NoTranscriptFound was raised.", exc_info=True)
-                 pass
-        logger_to_use.info(f"No auto-generated transcript found in any language for video {video_id}.")
-        
-        logger_to_use.error(f"No suitable transcript found for video {video_id}.")
-        return None, None, None
+            available_manual = transcript_list._manually_created_transcripts
+            if available_manual:
+                first_available_manual_lang = list(available_manual.keys())[0]
+                if attempt == 0:
+                    logger_to_use.info(f"Attempting to find first available manual transcript ('{first_available_manual_lang}') for video {video_id}.")
+                try:
+                    transcript = transcript_list.find_manually_created_transcript([first_available_manual_lang])
+                    logger_to_use.info(f"Found manually created transcript in '{first_available_manual_lang}' (first available) for video {video_id}.")
+                    return transcript.fetch(), first_available_manual_lang, "manual"
+                except NoTranscriptFound:
+                    logger_to_use.warning(f"Key '{first_available_manual_lang}' existed in available_manual but NoTranscriptFound was raised.", exc_info=True)
+                    pass 
+            if attempt == 0:
+                logger_to_use.info(f"No manually created transcript found in any language for video {video_id}.")
 
-    except TranscriptsDisabled:
-        logger_to_use.error(f"Transcripts are disabled for video {video_id}.", exc_info=True)
-        return None, None, None
-    except Exception as e:
-        logger_to_use.error(f"An error occurred while fetching transcript for {video_id}: {e}", exc_info=True)
-        return None, None, None
+            available_generated = transcript_list._generated_transcripts
+            if available_generated:
+                first_available_generated_lang = list(available_generated.keys())[0]
+                if attempt == 0:
+                    logger_to_use.info(f"Attempting to find first available auto-generated transcript ('{first_available_generated_lang}') for video {video_id}.")
+                try:
+                    transcript = transcript_list.find_generated_transcript([first_available_generated_lang])
+                    logger_to_use.info(f"Found auto-generated transcript in '{first_available_generated_lang}' (first available) for video {video_id}.")
+                    return transcript.fetch(), first_available_generated_lang, "generated"
+                except NoTranscriptFound:
+                     logger_to_use.warning(f"Key '{first_available_generated_lang}' existed in available_generated but NoTranscriptFound was raised.", exc_info=True)
+                     pass
+            if attempt == 0:
+                 logger_to_use.info(f"No auto-generated transcript found in any language for video {video_id}.")
+            
+            logger_to_use.error(f"No suitable transcript found to fetch for video {video_id} even after listing available.")
+            return None, None, None # No suitable transcript type found to even attempt fetching
+
+        except (ET.ParseError, CouldNotRetrieveTranscript) as e: # Catch specific errors for retry
+            last_exception = e
+            logger_to_use.warning(f"Attempt {attempt + 1} to fetch transcript for {video_id} failed: {e}")
+            if attempt < max_retries:
+                logger_to_use.info(f"Retrying in {retry_delay_seconds} seconds...")
+                time.sleep(retry_delay_seconds)
+            else:
+                logger_to_use.error(f"All {max_retries + 1} attempts to fetch transcript for {video_id} failed.")
+                # Optionally re-raise the last exception or handle it as before
+                # For now, log and fall through to the generic exception handler or return None
+        except TranscriptsDisabled:
+            logger_to_use.error(f"Transcripts are disabled for video {video_id}.", exc_info=True)
+            return None, None, None # No point in retrying if disabled
+        except Exception as e: # Catch other unexpected errors from list_transcripts or other parts
+            logger_to_use.error(f"An unexpected error occurred while trying to list/find transcript for {video_id} on attempt {attempt + 1}: {e}", exc_info=True)
+            last_exception = e # Store it
+            if attempt < max_retries: # Also retry on generic errors during listing, could be temp network
+                 logger_to_use.info(f"Retrying generic error in {retry_delay_seconds} seconds...")
+                 time.sleep(retry_delay_seconds)
+            else:
+                logger_to_use.error(f"All {max_retries + 1} attempts failed due to unexpected errors for {video_id}.")
+                # Fall through to return None, None, None after logging the final error
+
+    # If all retries fail and we fall out of the loop
+    logger_to_use.error(f"Failed to fetch transcript for {video_id} after all retries. Last error: {last_exception}", exc_info=True if last_exception else False)
+    return None, None, None
 
 def get_youtube_video_title(video_url_or_id, logger=None):
     """
@@ -440,12 +471,18 @@ def translate_text_segments(transcript_data_processed,
                             source_lang_code, 
                             target_lang="zh-CN",
                             video_specific_output_path=None,
-                            logger=None):
+                            logger=None,
+                            global_logger_for_console=None):
     """
     Translates a list of processed transcript segments (with text, start, duration)
     using the configured LLM provider, via batched JSON objects.
     """
     logger_to_use = logger if logger else global_logger
+    # Use a local reference to global_logger_for_console or a dummy logger if None
+    console_logger = global_logger_for_console if global_logger_for_console else logging.getLogger("DummyConsole")
+    if global_logger_for_console is None : # Setup dummy logger to do nothing if not passed
+        console_logger.addHandler(logging.NullHandler())
+
     logger_to_use.info(f"--- LLM Provider from config: {config.LLM_PROVIDER} ---")
     
     if not transcript_data_processed:
@@ -572,13 +609,18 @@ def translate_text_segments(transcript_data_processed,
             if current_batch_input_segments:
                 all_batches.append(list(current_batch_input_segments))
 
-            logger_to_use.info(f"Prepared {len(json_segments_to_translate)} segments into {len(all_batches)} batches for translation based on token/segment limits.")
+            # logger_to_use.info(f"Prepared {len(json_segments_to_translate)} segments into {len(all_batches)} batches for translation based on token/segment limits.")
+            if all_batches:
+                console_logger.info(f"Prepared {len(all_batches)} batches for translation.") # Console message for batch count
+            else:
+                console_logger.info("No batches to translate.") 
 
             for batch_idx, actual_batch_segments in enumerate(all_batches):
                 if not actual_batch_segments:
                     continue
-                logger_to_use.info(f"Translating Batch {batch_idx + 1}/{len(all_batches)} with {len(actual_batch_segments)} segments...")
-
+                # logger_to_use.info(f"Translating Batch {batch_idx + 1}/{len(all_batches)} with {len(actual_batch_segments)} segments...") # File log only due to propagate=False
+                console_logger.info(f"Translating batch {batch_idx + 1}/{len(all_batches)}...") # Console message for batch progress
+                
                 segments_for_payload_this_batch = []
                 if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
                     for i, seg_data in enumerate(actual_batch_segments):
@@ -735,6 +777,7 @@ def translate_text_segments(transcript_data_processed,
             return final_translated_texts
         except Exception as e:
             logger_to_use.critical(f"A critical error occurred during Gemini JSON setup or outer processing loop: {e}", exc_info=True)
+            console_logger.error(f"A critical error occurred during translation setup: {e}") # Also to console
             # Log this critical error to the .jsonl file as well if possible
             if raw_llm_responses_log_file:
                 try:
@@ -842,21 +885,24 @@ def main():
     args = parser.parse_args()
     load_dotenv()
 
-    # Temporary logger setup for initial messages until video-specific path is known
     # This basicConfig will affect the root logger, sending messages to console.
     # We will create a more specific file logger for the video task later.
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - CONSOLE - %(message)s', force=True)
 
-    logging.info(f"--- YouTube Translator script started for input: {args.video_url_or_id} ---")
-    logging.info(f"Target language: {args.target_lang}, Requested log level: {args.log_level}")
-    logging.info(f"Base output directory for all videos: {args.output_dir}")
+    print(f"--- YouTube Translator script started for input: {args.video_url_or_id} ---") # Changed from logging.info
+    # These initial logging.info messages will now only go to console if their level is WARNING or higher, 
+    # or if a specific handler (like global_logger's) is configured for INFO and they use that logger.
+    # They will be captured by video_logger later for the file log.
+    # logging.info(f"Target language: {args.target_lang}, Requested log level: {args.log_level}") # Example: will not show on console
+    # logging.info(f"Base output directory for all videos: {args.output_dir}") # Example: will not show on console
 
     video_id_for_transcript = get_video_id(args.video_url_or_id)
-    logging.info(f"Processing Video ID: {video_id_for_transcript}")
+    # logging.info(f"Processing Video ID: {video_id_for_transcript}") # Example: will not show on console
 
     # Get video title (using the existing function, which now might use pytubefix)
-    # We'll pass a logger to it in the next step of refactoring.
-    video_title = get_youtube_video_title(args.video_url_or_id) # Placeholder for logger
+    # The first call to get_youtube_video_title uses global_logger by default if logger is None
+    # This ensures the initial title fetching attempt is logged to console via global_logger.
+    video_title = get_youtube_video_title(args.video_url_or_id, logger=None) 
     sanitized_title = sanitize_filename(video_title)
 
     specific_output_dir_name = sanitized_title
@@ -896,35 +942,41 @@ def main():
     raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id_for_transcript, logger=video_logger)
 
     if not raw_transcript_data:
-        video_logger.error("Could not retrieve transcript. Exiting process for this video.")
+        video_logger.error("Could not retrieve transcript. Exiting process for this video.") # Error will still show on console
         return
-    video_logger.info(f"Successfully fetched raw transcript in '{lang_code}' ({source_type}). Original segment count: {len(raw_transcript_data)}.")
+    # video_logger.info(f"Successfully fetched raw transcript in '{lang_code}' ({source_type}). Original segment count: {len(raw_transcript_data)}.")
+    global_logger.info(f"Successfully fetched {source_type} transcript in '{lang_code}'.") # Console message
     
-    video_logger.info("Starting preprocessing and merging of transcript segments...")
+    # video_logger.info("Starting preprocessing and merging of transcript segments...") # File log only due to propagate=False
     merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data, logger=video_logger)
 
     if not merged_transcript_data:
         video_logger.error("Transcript data is empty after preprocessing and merging. Exiting process for this video.")
         return
-    video_logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
+    # video_logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
+    global_logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.") # Console message
     transcript_data_for_processing = merged_transcript_data
     
     original_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_original_merged_{lang_code}.md")
     original_md = transcript_to_markdown(transcript_data_for_processing, lang_code, source_type, video_id_for_transcript, logger=video_logger)
     save_to_file(original_md, original_md_filename, logger=video_logger)
     
-    video_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}' using JSON method...")
+    # video_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}' using JSON method...") # File log only
+    global_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}'...") # Console message
     translated_texts = translate_text_segments(
         transcript_data_for_processing, 
         lang_code,                      
         args.target_lang,
         video_output_path, # Pass the video_output_path here for logging raw LLM responses
-        logger=video_logger 
+        logger=video_logger,
+        global_logger_for_console=global_logger # Pass global_logger for console updates
     )
 
     if not translated_texts :
         video_logger.error("Translation failed or returned no segments. Exiting process for this video.")
         return
+    global_logger.info("Translation processing complete.") # Console message
+
     if len(translated_texts) != len(transcript_data_for_processing):
          video_logger.warning(f"Number of translated segments ({len(translated_texts)}) does not match original ({len(transcript_data_for_processing)}). Results might be incomplete or misaligned.")
 
@@ -937,7 +989,7 @@ def main():
     save_to_file(translated_srt_content, translated_srt_filename, logger=video_logger)
 
     video_logger.info("All tasks completed for this video!")
-    logging.info(f"--- YouTube Translator script finished for input: {args.video_url_or_id} ---") # Use basicConfig logger for final global message
+    print(f"--- YouTube Translator script finished for input: {args.video_url_or_id} ---") # Changed from logging.info
     
     # The following print statements remain for direct console feedback in addition to logs.
     print("\nAll tasks completed!")
