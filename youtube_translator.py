@@ -1,19 +1,62 @@
 import argparse
 import os # Added for .env
+import logging # Added for logging
+import logging.handlers # Added for potential future use like rotating file handler
+from datetime import datetime # Added for timestamp in log filename
 from dotenv import load_dotenv # Added for .env
+
+# pytubefix import should be here if not already present from previous steps
+from pytubefix import YouTube # Make sure this line is present and correct
+
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled
+# from pytube import YouTube # Commented out original pytube import
+import shutil # Added for safe filename
 import config # Added for config.py
 import google.generativeai as genai # Added for Gemini
 import time # Added for time.sleep if using batch delays
 import json # Added for new translation flow
 import re # For normalizing timestamp IDs
+import string # Added for sanitize_filename
 
-def get_youtube_transcript(video_url_or_id):
+# --- Global Logger for general script messages (console output) ---
+global_logger = logging.getLogger("GlobalYoutubeTranslator")
+global_logger.setLevel(logging.INFO)
+console_handler = logging.StreamHandler()
+console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - GLOBAL - %(message)s')
+console_handler.setFormatter(console_formatter)
+if not global_logger.handlers:
+    global_logger.addHandler(console_handler)
+# --- End of Global Logger Setup ---
+
+def setup_video_logger(logger_name, log_file_path, level=logging.INFO):
+    """Sets up a specific logger for a video processing task, outputting to a file."""
+    logger = logging.getLogger(logger_name)
+    logger.setLevel(level)
+    # Prevent duplicate handlers if this function might be called multiple times 
+    # for the same logger instance with the same name (which it shouldn't in our case
+    # as logger_name will be unique per video task run).
+    if logger.hasHandlers():
+        logger.handlers.clear()
+
+    # File Handler
+    file_handler = logging.FileHandler(log_file_path, mode='a', encoding='utf-8')
+    
+    # Format: TIMESTAMP - LOGGER_NAME - LEVEL - FUNCTION_NAME - LINENO - MESSAGE
+    log_format = '%(asctime)s - %(name)s - %(levelname)s - (%(module)s.%(funcName)s:%(lineno)d) - %(message)s'
+    formatter = logging.Formatter(log_format)
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    return logger
+
+def get_youtube_transcript(video_url_or_id, logger=None):
     """
     Fetches the transcript for a given YouTube video ID or URL.
     Prioritizes manually created transcripts, then falls back to generated ones.
     Languages are prioritized based on config.py, then any available.
     """
+    logger_to_use = logger if logger else global_logger
+
     video_id = video_url_or_id
     if "youtube.com/watch?v=" in video_url_or_id:
         video_id = video_url_or_id.split("watch?v=")[1].split("&")[0]
@@ -25,60 +68,115 @@ def get_youtube_transcript(video_url_or_id):
         
         # Use preferred languages from config
         preferred_langs = config.PREFERRED_TRANSCRIPT_LANGUAGES
+        logger_to_use.info(f"Attempting to find manual transcript in preferred languages: {preferred_langs} for video {video_id}")
 
         # Try manual transcript in preferred languages
         for lang in preferred_langs:
             try:
                 transcript = transcript_list.find_manually_created_transcript([lang])
-                print(f"Found manually created transcript in '{lang}'.")
+                logger_to_use.info(f"Found manually created transcript in '{lang}' for video {video_id}.")
                 return transcript.fetch(), lang, "manual"
             except NoTranscriptFound:
                 continue
-        print(f"No manually created transcript found in preferred languages: {preferred_langs}.")
+        logger_to_use.info(f"No manually created transcript found in preferred languages for video {video_id}.")
 
         # Try generated transcript in preferred languages
+        logger_to_use.info(f"Attempting to find auto-generated transcript in preferred languages: {preferred_langs} for video {video_id}")
         for lang in preferred_langs:
             try:
                 transcript = transcript_list.find_generated_transcript([lang])
-                print(f"Found auto-generated transcript in '{lang}'.")
+                logger_to_use.info(f"Found auto-generated transcript in '{lang}' for video {video_id}.")
                 return transcript.fetch(), lang, "generated"
             except NoTranscriptFound:
                 continue
-        print(f"No auto-generated transcript found in preferred languages: {preferred_langs}.")
+        logger_to_use.info(f"No auto-generated transcript found in preferred languages for video {video_id}.")
 
         # If not found in preferred languages, try any manual transcript
         available_manual = transcript_list._manually_created_transcripts
         if available_manual:
             first_available_manual_lang = list(available_manual.keys())[0]
+            logger_to_use.info(f"Attempting to find first available manual transcript ('{first_available_manual_lang}') for video {video_id}.")
             try:
                 transcript = transcript_list.find_manually_created_transcript([first_available_manual_lang])
-                print(f"Found manually created transcript in '{first_available_manual_lang}' (first available).")
+                logger_to_use.info(f"Found manually created transcript in '{first_available_manual_lang}' (first available) for video {video_id}.")
                 return transcript.fetch(), first_available_manual_lang, "manual"
             except NoTranscriptFound: # Should not happen if key exists
+                logger_to_use.warning(f"Key '{first_available_manual_lang}' existed in available_manual but NoTranscriptFound was raised.", exc_info=True)
                 pass 
-        print("No manually created transcript found in any language.")
+        logger_to_use.info(f"No manually created transcript found in any language for video {video_id}.")
 
         # If no manual transcript, try any generated transcript
         available_generated = transcript_list._generated_transcripts
         if available_generated:
             first_available_generated_lang = list(available_generated.keys())[0]
+            logger_to_use.info(f"Attempting to find first available auto-generated transcript ('{first_available_generated_lang}') for video {video_id}.")
             try:
                 transcript = transcript_list.find_generated_transcript([first_available_generated_lang])
-                print(f"Found auto-generated transcript in '{first_available_generated_lang}' (first available).")
+                logger_to_use.info(f"Found auto-generated transcript in '{first_available_generated_lang}' (first available) for video {video_id}.")
                 return transcript.fetch(), first_available_generated_lang, "generated"
             except NoTranscriptFound: # Should not happen
+                 logger_to_use.warning(f"Key '{first_available_generated_lang}' existed in available_generated but NoTranscriptFound was raised.", exc_info=True)
                  pass
-        print("No auto-generated transcript found in any language.")
+        logger_to_use.info(f"No auto-generated transcript found in any language for video {video_id}.")
         
-        print(f"No suitable transcript found for video {video_id}.")
+        logger_to_use.error(f"No suitable transcript found for video {video_id}.")
         return None, None, None
 
     except TranscriptsDisabled:
-        print(f"Transcripts are disabled for video {video_id}.")
+        logger_to_use.error(f"Transcripts are disabled for video {video_id}.", exc_info=True)
         return None, None, None
     except Exception as e:
-        print(f"An error occurred while fetching transcript for {video_id}: {e}")
+        logger_to_use.error(f"An error occurred while fetching transcript for {video_id}: {e}", exc_info=True)
         return None, None, None
+
+def get_youtube_video_title(video_url_or_id, logger=None):
+    """
+    Fetches the title of a YouTube video.
+    """
+    logger_to_use = logger if logger else global_logger
+    video_url_for_pytube = video_url_or_id
+    if not video_url_for_pytube.startswith("http"):
+        video_url_for_pytube = f"https://www.youtube.com/watch?v={video_url_or_id}"
+    
+    logger_to_use.info(f"Attempting to fetch video title for: {video_url_or_id} (using URL: {video_url_for_pytube})")
+    try:
+        yt = YouTube(video_url_for_pytube)
+        title = yt.title
+        logger_to_use.info(f"Successfully fetched video title: '{title}' for {video_url_or_id}")
+        return title
+    except Exception as e:
+        logger_to_use.error(f"Error fetching video title for '{video_url_or_id}': {e}", exc_info=True)
+        # Fallback: extract video_id if it was a URL, or return the ID itself
+        video_id_fallback = video_url_or_id
+        if "youtube.com/watch?v=" in video_url_or_id:
+            video_id_fallback = video_url_or_id.split("watch?v=")[1].split("&")[0]
+        elif "youtu.be/" in video_url_or_id:
+            video_id_fallback = video_url_or_id.split("youtu.be/")[1].split("?")[0]
+        return video_id_fallback # Return ID as fallback title
+
+def sanitize_filename(filename):
+    """
+    Sanitizes a string to be a valid filename.
+    Removes or replaces invalid characters.
+    """
+    if not filename:
+        return "untitled"
+    # Replace problematic characters with underscores
+    valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
+    sanitized_name = ''.join(c if c in valid_chars else '_' for c in filename)
+    # Replace multiple underscores with a single one
+    sanitized_name = re.sub(r'__+', '_', sanitized_name)
+    # Remove leading/trailing underscores or spaces
+    sanitized_name = sanitized_name.strip('_ ')
+    # Limit length (optional, but good practice)
+    max_len = 100 
+    if len(sanitized_name) > max_len:
+        sanitized_name = sanitized_name[:max_len].rsplit('_', 1)[0] # try to cut at a separator
+        if not sanitized_name : # if rsplit removed everything
+             sanitized_name = filename[:max_len//2] # fallback to a hard cut of original
+    if not sanitized_name: # If all else fails
+        return "untitled_video"
+    return sanitized_name
 
 def format_time(seconds_val):
     """Converts seconds to SRT time format (HH:MM:SS,ms)"""
@@ -101,13 +199,16 @@ def format_time(seconds_val):
     
     return f"{hours:02d}:{minutes:02d}:{final_seconds_part:02d},{millis:03d}"
 
-def preprocess_and_merge_segments(raw_transcript_data):
+def preprocess_and_merge_segments(raw_transcript_data, logger=None):
     """
     Merges raw transcript segments based on duration, length, and punctuation.
     Also cleans up newlines within segments.
     """
+    logger_to_use = logger if logger else global_logger
     if not raw_transcript_data:
+        logger_to_use.info("preprocess_and_merge_segments: Received empty raw_transcript_data. Returning empty list.")
         return []
+    logger_to_use.info(f"preprocess_and_merge_segments: Starting with {len(raw_transcript_data)} raw entries.")
 
     # --- Pass 1: Initial Cleaning from API data --- 
     initial_cleaned_entries = []
@@ -161,8 +262,8 @@ def preprocess_and_merge_segments(raw_transcript_data):
         return False
     # --- End of Helper --- 
 
-    print(f"\n--- Starting Pre-segmentation and Merging Logic ---")
-    print(f"Pass 1: Initial cleaning complete. {len(initial_cleaned_entries)} entries.")
+    logger_to_use.debug(f"\n--- Starting Pre-segmentation and Merging Logic ---")
+    logger_to_use.debug(f"Pass 1: Initial cleaning complete. {len(initial_cleaned_entries)} entries.")
 
     # --- Pass 2: Pre-splitting entries with internal punctuations --- 
     fine_grained_entries = []
@@ -215,11 +316,11 @@ def preprocess_and_merge_segments(raw_transcript_data):
                     })
                 text_to_process = "" # All processed for this original entry
         
-    print(f"Pass 2: Pre-splitting complete. {len(fine_grained_entries)} fine-grained entries generated.")
+    logger_to_use.debug(f"Pass 2: Pre-splitting complete. {len(fine_grained_entries)} fine-grained entries generated.")
 
     # --- Pass 3: Merge fine-grained entries based ONLY on SENTENCE_END_PUNCTUATIONS at the very end --- 
-    print(f"\nPass 3: Merging fine-grained entries (Punctuation ONLY at end of accumulation)...")
-    print(f"Configured Sentence End Punctuations: {config.SENTENCE_END_PUNCTUATIONS}\n")
+    logger_to_use.debug(f"\nPass 3: Merging fine-grained entries (Punctuation ONLY at end of accumulation)...")
+    logger_to_use.debug(f"Configured Sentence End Punctuations: {config.SENTENCE_END_PUNCTUATIONS}\n")
 
     final_merged_segments = []
     current_accumulated_fine_grained_entries = [] 
@@ -243,7 +344,7 @@ def preprocess_and_merge_segments(raw_transcript_data):
             pass # Explicitly passing if no action needed
 
     if current_accumulated_fine_grained_entries:
-        print(f"\n  Pass 3 - Finalizing remaining accumulated fine-grained entries as the last segment.")
+        logger_to_use.debug(f"\n  Pass 3 - Finalizing remaining accumulated fine-grained entries as the last segment.")
         segment_text = " ".join(e['text'] for e in current_accumulated_fine_grained_entries)
         segment_start_time = current_accumulated_fine_grained_entries[0]['start']
         segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
@@ -255,11 +356,12 @@ def preprocess_and_merge_segments(raw_transcript_data):
             'duration': segment_duration
         })
     
-    print(f"\n--- Pre-segmentation and Merging Logic Finished. Total segments: {len(final_merged_segments)} ---")
+    logger_to_use.info(f"--- Pre-segmentation and Merging Logic Finished. Total segments: {len(final_merged_segments)} ---")
     return final_merged_segments
 
-def transcript_to_markdown(transcript_data, lang_code, source_type, video_id):
+def transcript_to_markdown(transcript_data, lang_code, source_type, video_id, logger=None):
     """Converts transcript data (list of dicts) to Markdown with timestamps."""
+    logger_to_use = logger if logger else global_logger
     md_content = [f"# YouTube Video Transcript: {video_id}\n"]
     md_content.append(f"**Source Language:** {lang_code}")
     md_content.append(f"**Source Type:** {source_type} subtitles\n")
@@ -336,15 +438,18 @@ def _normalize_timestamp_id(id_str):
 
 def translate_text_segments(transcript_data_processed, 
                             source_lang_code, 
-                            target_lang="zh-CN"):
+                            target_lang="zh-CN",
+                            video_specific_output_path=None,
+                            logger=None):
     """
     Translates a list of processed transcript segments (with text, start, duration)
     using the configured LLM provider, via batched JSON objects.
     """
-    print(f"\n--- LLM Provider from config: {config.LLM_PROVIDER} ---")
+    logger_to_use = logger if logger else global_logger
+    logger_to_use.info(f"--- LLM Provider from config: {config.LLM_PROVIDER} ---")
     
     if not transcript_data_processed:
-        print("No segments to translate.")
+        logger_to_use.info("No segments to translate.")
         return []
 
     json_segments_to_translate = []
@@ -357,10 +462,18 @@ def translate_text_segments(transcript_data_processed,
 
     translations_map = {} 
 
+    raw_llm_responses_log_file = None
+    if video_specific_output_path:
+        log_filename = f"llm_raw_responses_{target_lang.lower().replace('-', '_')}.jsonl"
+        raw_llm_responses_log_file = os.path.join(video_specific_output_path, log_filename)
+        # Ensure the directory exists (it should be created by main, but good to be safe)
+        os.makedirs(video_specific_output_path, exist_ok=True)
+        logger_to_use.info(f"Raw LLM API responses will be logged to: {raw_llm_responses_log_file}")
+
     if config.LLM_PROVIDER == "gemini":
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            print("Error: GEMINI_API_KEY not found. Translation will be skipped.")
+            logger_to_use.error("GEMINI_API_KEY not found. Translation will be skipped.")
             return [f"[SKIPPED_NO_KEY] {s['text_en']}" for s in json_segments_to_translate]
 
         try:
@@ -373,8 +486,8 @@ def translate_text_segments(transcript_data_processed,
                 config.LLM_MODEL_GEMINI,
                 generation_config=generation_config
             ) 
-            print(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode, temperature=0.0)." )
-            print(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
+            logger_to_use.info(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode, temperature=0.0)." )
+            logger_to_use.info(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
 
             output_text_field_key = f"text_{target_lang.lower().replace('-', '_')}" 
 
@@ -421,7 +534,7 @@ def translate_text_segments(transcript_data_processed,
             # Flag to control the ID strategy
             USE_SIMPLIFIED_IDS_EXPERIMENTAL = True
             if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
-                print("INFO: Using SIMPLIFIED IDs (seg_N) for translation batches.")
+                logger_to_use.info("Using SIMPLIFIED IDs (seg_N) for translation batches.")
 
             for seg_obj in json_segments_to_translate:
                 potential_segments_for_this_batch = current_batch_input_segments + [seg_obj]
@@ -441,7 +554,7 @@ def translate_text_segments(transcript_data_processed,
                 try:
                     num_tokens_if_added = model.count_tokens(prompt_if_added).total_tokens
                 except Exception as e_count:
-                    print(f"  Warning: Token counting failed for a potential batch. Error: {e_count}. Proceeding with segment count only for this decision.")
+                    logger_to_use.warning(f"Token counting failed for a potential batch. Error: {e_count}. Proceeding with segment count only for this decision.", exc_info=True)
                     if len(potential_segments_for_this_batch) > 10: 
                          num_tokens_if_added = config.TARGET_PROMPT_TOKENS_PER_BATCH + 1 
                     else:
@@ -459,12 +572,12 @@ def translate_text_segments(transcript_data_processed,
             if current_batch_input_segments:
                 all_batches.append(list(current_batch_input_segments))
 
-            print(f"Prepared {len(json_segments_to_translate)} segments into {len(all_batches)} batches for translation based on token/segment limits.")
+            logger_to_use.info(f"Prepared {len(json_segments_to_translate)} segments into {len(all_batches)} batches for translation based on token/segment limits.")
 
             for batch_idx, actual_batch_segments in enumerate(all_batches):
                 if not actual_batch_segments:
                     continue
-                print(f"Translating Batch {batch_idx + 1}/{len(all_batches)} with {len(actual_batch_segments)} segments...")
+                logger_to_use.info(f"Translating Batch {batch_idx + 1}/{len(all_batches)} with {len(actual_batch_segments)} segments...")
 
                 segments_for_payload_this_batch = []
                 if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
@@ -486,20 +599,47 @@ def translate_text_segments(transcript_data_processed,
                 
                 try:
                     response = model.generate_content(prompt_to_send)
+                    
+                    # Log the raw response text immediately after receiving it
+                    if raw_llm_responses_log_file:
+                        try:
+                            # Ensure response.text exists and is not empty before writing
+                            raw_text_to_log = response.text if hasattr(response, 'text') and response.text else None
+                            if raw_text_to_log:
+                                with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
+                                    f_raw.write(raw_text_to_log + '\n')
+                            else:
+                                # Log a placeholder if response.text is empty or missing, but response object exists
+                                with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
+                                    placeholder_log = {"batch_index": batch_idx + 1, "status": "EMPTY_RESPONSE_TEXT", "has_parts": bool(response.parts if hasattr(response, 'parts') else False)}
+                                    f_raw.write(json.dumps(placeholder_log) + '\n')
+                        except Exception as e_log:
+                            logger_to_use.warning(f"Could not write raw LLM response for batch {batch_idx + 1} to log file: {e_log}", exc_info=True)
+
                     if not response.parts:
-                         print(f"  Warning: Gemini response for batch {batch_idx+1} has no parts. Using originals.")
+                         logger_to_use.warning(f"Gemini response for batch {batch_idx+1} has no parts. Using originals.")
                          for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_EMPTY_RESPONSE] {seg['text_en']}"
                          continue
                     try:
                         translated_json_str = response.text 
-                        translated_data = json.loads(translated_json_str)
+                        # --- Attempt to fix extra trailing curly brace --- 
+                        cleaned_json_str = translated_json_str.strip()
+                        if cleaned_json_str.startswith('{') and cleaned_json_str.endswith('}'):
+                            # Count braces to see if there is an imbalance favouring closing braces at the very end
+                            if cleaned_json_str.count('}') == cleaned_json_str.count('{') + 1:
+                                logger_to_use.warning("Attempting to fix a potential extra trailing curly brace in JSON response.")
+                                # Remove the last character if it's a brace and counts are off by one
+                                cleaned_json_str = cleaned_json_str[:-1]
+                        # --- End of fix attempt ---
+                        
+                        translated_data = json.loads(cleaned_json_str) # Use the cleaned string
                         if 'translated_segments' not in translated_data or not isinstance(translated_data['translated_segments'], list):
-                            print(f"  Warning: 'translated_segments' array not found/invalid in response for batch {batch_idx+1}. Raw: {translated_json_str[:200]}... Using originals.")
+                            logger_to_use.warning(f"  Warning: 'translated_segments' array not found/invalid in response for batch {batch_idx+1}. Raw: {cleaned_json_str[:200] if cleaned_json_str else 'EMPTY'}... Using originals.")
                             for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_BAD_JSON_STRUCTURE] {seg['text_en']}"
                             continue
                         translated_batch_segments_from_response = translated_data['translated_segments']
                         if len(translated_batch_segments_from_response) != len(actual_batch_segments):
-                            print(f"  Warning: Mismatch in translated segments for batch {batch_idx+1} (expected {len(actual_batch_segments)}, got {len(translated_batch_segments_from_response)}). Using originals for this batch.")
+                            logger_to_use.warning(f"Mismatch in translated segments for batch {batch_idx+1} (expected {len(actual_batch_segments)}, got {len(translated_batch_segments_from_response)}). Using originals for this batch.")
                             for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_SEG_COUNT_MISMATCH] {seg['text_en']}"
                             continue
                         
@@ -515,50 +655,61 @@ def translate_text_segments(transcript_data_processed,
                                 model_returned_simple_id = translated_seg_item.get("id")
 
                                 if not model_returned_simple_id:
-                                    print(f"  Warning: ID missing in translated segment. Batch {batch_idx+1}. Expected simple ID '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}'). Skipping.")
+                                    logger_to_use.warning(f"ID missing in translated segment. Batch {batch_idx+1}. Expected simple ID '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}'). Skipping.")
                                     translations_map[map_key] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {text_en_from_actual_batch}"
                                     continue
                                 if model_returned_simple_id != expected_simple_id:
-                                    print(f"  Warning: Simple ID mismatch from model. Batch {batch_idx+1}.\\n     Expected: '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}')\\n     Model Returned: '{model_returned_simple_id}'. Skipping.")
+                                    logger_to_use.warning(f"Simple ID mismatch from model. Batch {batch_idx+1}.\n     Expected: '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}')\n     Model Returned: '{model_returned_simple_id}'. Skipping.")
                                     translations_map[map_key] = f"[NO_TRANSLATION_SIMPLE_ID_MISMATCH] {text_en_from_actual_batch}"
                                     continue
                                 # If we are here, simple ID from model is correct and matches expected.
                             else: # Original (complex) ID logic
                                 translated_id_from_model = translated_seg_item.get("id")
                                 if not translated_id_from_model:
-                                    print(f"  Warning: ID missing in translated segment for original ID '{original_complex_id_from_actual_batch}' in batch {batch_idx+1}. Skipping.")
+                                    logger_to_use.warning(f"ID missing in translated segment for original ID '{original_complex_id_from_actual_batch}' in batch {batch_idx+1}. Skipping.")
                                     translations_map[map_key] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {text_en_from_actual_batch}"
                                     continue
 
                                 normalized_translated_id = _normalize_timestamp_id(translated_id_from_model)
                                 
                                 if map_key != normalized_translated_id: # map_key is already the normalized original complex ID
-                                    print(f"  Warning: ID mismatch after attempting to normalize model response. Batch {batch_idx+1}.\\n     Original (Normalized): '{map_key}'\\n     Model Output Raw : '{translated_id_from_model}'\\n     Model OutputNormd: '{normalized_translated_id}'. Skipping segment.")
+                                    logger_to_use.warning(f"ID mismatch after attempting to normalize model response. Batch {batch_idx+1}.\n     Original (Normalized): '{map_key}'\n     Model Output Raw : '{translated_id_from_model}'\n     Model OutputNormd: '{normalized_translated_id}'. Skipping segment.")
                                     translations_map[map_key] = f"[NO_TRANSLATION_ID_MISMATCH_NORM_FAILED_OR_VALUE_DIFF] {text_en_from_actual_batch}"
                                     continue
                             
                             # Common logic for checking text field and storing translation
                             if output_text_field_key not in translated_seg_item:
                                 id_for_error_msg = f"seg_{i}" if USE_SIMPLIFIED_IDS_EXPERIMENTAL else original_complex_id_from_actual_batch
-                                print(f"  Warning: Expected field '{output_text_field_key}' not found for ID '{id_for_error_msg}' in batch {batch_idx+1}. Using original.")
+                                logger_to_use.warning(f"Expected field '{output_text_field_key}' not found for ID '{id_for_error_msg}' in batch {batch_idx+1}. Using original.")
                                 translations_map[map_key] = f"[NO_TRANSLATION_MISSING_TEXT_FIELD] {text_en_from_actual_batch}"
                                 continue
                             
                             translations_map[map_key] = translated_seg_item[output_text_field_key]
-                        print(f"  Batch {batch_idx + 1} translated successfully.")
+                        logger_to_use.info(f"Batch {batch_idx + 1} translated successfully.")
                     except json.JSONDecodeError as e_json:
-                        print(f"  Error decoding JSON response from Gemini for batch {batch_idx+1}: {e_json}. Raw: {response.text[:500] if response.text else 'EMPTY'}")
+                        logger_to_use.error(f"  Error decoding JSON response from Gemini for batch {batch_idx+1}: {e_json}. Cleaned Raw Attempt: {(cleaned_json_str[:500] if cleaned_json_str else 'EMPTY_STRING_FOR_DECODE')}", exc_info=True)
                         for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_JSON_DECODE] {seg['text_en']}"
                     except Exception as e_resp_proc:
-                        print(f"  Error processing response from Gemini for batch {batch_idx+1}: {e_resp_proc}")
+                        logger_to_use.error(f"Error processing response from Gemini for batch {batch_idx+1}: {e_resp_proc}", exc_info=True)
                         for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_RESP_PROCESSING] {seg['text_en']}"
                 except Exception as e_api_call:
-                    print(f"  An error occurred during Gemini API call for batch {batch_idx+1}: {e_api_call}. This might be due to the batch size exceeding model limits even after token counting.")
+                    logger_to_use.error(f"An error occurred during Gemini API call for batch {batch_idx+1}: {e_api_call}. This might be due to the batch size exceeding model limits even after token counting.", exc_info=True)
+                    if raw_llm_responses_log_file:
+                        try:
+                            with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
+                                error_info = {
+                                    "batch_index": batch_idx + 1, 
+                                    "status": "API_CALL_ERROR", 
+                                    "error_message": str(e_api_call)
+                                }
+                                f_raw.write(json.dumps(error_info) + '\n')
+                        except Exception as e_log_err:
+                            logger_to_use.warning(f"Could not write API call error to log file for batch {batch_idx + 1}: {e_log_err}", exc_info=True)
                     for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_API_CALL] {seg['text_en']}"
                 
                 delay_seconds = getattr(config, 'LLM_REQUEST_DELAY', 0)
                 if delay_seconds > 0 and batch_idx < len(all_batches) - 1 :
-                    print(f"  Waiting for {delay_seconds}s before next batch...")
+                    logger_to_use.info(f"Waiting for {delay_seconds}s before next batch...")
                     time.sleep(delay_seconds)
 
             final_translated_texts = []
@@ -578,26 +729,51 @@ def translate_text_segments(transcript_data_processed,
                 )
             
             if len(final_translated_texts) != len(json_segments_to_translate):
-                 print(f"Critical Warning: Final translated segment count ({len(final_translated_texts)}) MISMATCHES original segment count ({len(json_segments_to_translate)}).")
+                 logger_to_use.critical(f"Final translated segment count ({len(final_translated_texts)}) MISMATCHES original segment count ({len(json_segments_to_translate)}).")
             
-            print(f"--- Gemini JSON translation processing complete. ---")
+            logger_to_use.info(f"--- Gemini JSON translation processing complete. ---")
             return final_translated_texts
         except Exception as e:
-            print(f"A critical error occurred during Gemini JSON setup or outer processing loop: {e}")
+            logger_to_use.critical(f"A critical error occurred during Gemini JSON setup or outer processing loop: {e}", exc_info=True)
+            # Log this critical error to the .jsonl file as well if possible
+            if raw_llm_responses_log_file:
+                try:
+                    with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
+                        error_info = {
+                            "batch_index": batch_idx + 1, 
+                            "status": "CRITICAL_ERROR_TRANSLATING", 
+                            "error_message": str(e)
+                        }
+                        f_raw.write(json.dumps(error_info) + '\n')
+                except Exception as e_log_crit:
+                    logger_to_use.warning(f"Could not write critical outer processing error to log file: {e_log_crit}", exc_info=True)
             return [f"[CRITICAL_ERROR_TRANSLATING] {s['text_en']}" for s in json_segments_to_translate]
     else:
-        print(f"Unsupported or misconfigured LLM_PROVIDER: {config.LLM_PROVIDER}. Using simulated translation.")
+        logger_to_use.warning(f"Unsupported or misconfigured LLM_PROVIDER: {config.LLM_PROVIDER}. Using simulated translation.")
         simulated_translated_segments = []
+        if raw_llm_responses_log_file: # Log simulation info
+            try:
+                with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
+                    error_info = {
+                        "batch_index": batch_idx + 1, 
+                        "status": "SIMULATED_TRANSLATION", 
+                        "error_message": "Simulated translation used as no valid LLM_PROVIDER configured"
+                    }
+                    f_raw.write(json.dumps(error_info) + '\n')
+            except Exception as e_log_sim:
+                logger_to_use.warning(f"Could not write simulation info to log file: {e_log_sim}", exc_info=True)
+
         for seg_obj in json_segments_to_translate: 
             translated_text = f"[译] {seg_obj['text_en']}" 
             simulated_translated_segments.append(translated_text)
-        print("--- Simulated translation complete ---")
+        logger_to_use.info("--- Simulated translation complete ---")
         return simulated_translated_segments
 
-def reconstruct_translated_srt(original_transcript_data, translated_texts):
+def reconstruct_translated_srt(original_transcript_data, translated_texts, logger=None):
     """Reconstructs SRT from original timestamps and translated texts."""
+    logger_to_use = logger if logger else global_logger
     if len(original_transcript_data) != len(translated_texts):
-        print("Warning: Mismatch between original transcript entries and translated texts count.")
+        logger_to_use.warning("Mismatch between original transcript entries and translated texts count in reconstruct_translated_srt.")
         # Pad or truncate translated_texts if necessary, or handle error more gracefully
         # For now, we'll proceed but this might lead to incorrect SRT.
         # A robust solution would be to ensure the translation function returns a list of the same length.
@@ -612,10 +788,11 @@ def reconstruct_translated_srt(original_transcript_data, translated_texts):
         srt_content.append(f"{i+1}\n{start_time} --> {end_time}\n{text}\n")
     return "\n".join(srt_content)
 
-def reconstruct_translated_markdown(original_transcript_data, translated_texts, original_lang, source_type, target_lang="zh-CN", video_id=""):
+def reconstruct_translated_markdown(original_transcript_data, translated_texts, original_lang, source_type, target_lang="zh-CN", video_id="", logger=None):
     """Reconstructs Markdown from original timestamps (list of dicts) and translated texts."""
+    logger_to_use = logger if logger else global_logger
     if len(original_transcript_data) != len(translated_texts):
-        print("Warning: Mismatch between original transcript entries and translated texts count during MD reconstruction.")
+        logger_to_use.warning("Mismatch between original transcript entries and translated texts count during MD reconstruction.")
 
     md_content = [f"# YouTube Video Translation: {video_id}\n"]
     md_content.append(f"**Original Language:** {original_lang} ({source_type})")
@@ -630,14 +807,15 @@ def reconstruct_translated_markdown(original_transcript_data, translated_texts, 
         md_content.append(f"## {start_time} --> {end_time}\n{text}\n")
     return "\n".join(md_content)
 
-def save_to_file(content, filename):
+def save_to_file(content, filename, logger=None):
     """Saves content to a file."""
+    logger_to_use = logger if logger else global_logger
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(content)
-        print(f"Successfully saved to {filename}")
+        logger_to_use.info(f"Successfully saved to {filename}")
     except IOError as e:
-        print(f"Error saving file {filename}: {e}")
+        logger_to_use.error(f"Error saving file {filename}: {e}", exc_info=True)
 
 def get_video_id(url_or_id):
     if "youtube.com/watch?v=" in url_or_id:
@@ -647,66 +825,131 @@ def get_video_id(url_or_id):
     return url_or_id # Assume it's already an ID if no common URL patterns match
 
 def main():
+    # Determine the script's directory and the desired default output directory
+    script_path = os.path.abspath(__file__)
+    script_dir = os.path.dirname(script_path)
+    project_parent_dir = os.path.dirname(script_dir)
+    default_output_folder_name = "output_translations"
+    default_output_dir_path = os.path.join(project_parent_dir, default_output_folder_name)
+
     parser = argparse.ArgumentParser(description="Translate YouTube video subtitles.")
     parser.add_argument("video_url_or_id", help="The URL or ID of the YouTube video.")
-    parser.add_argument("--output_basename", help="Basename for output files (e.g., 'my_video'). Defaults to video ID.", default=None)
+    parser.add_argument("--output_basename", help="Basename for output files (e.g., 'my_video'). Overrides fetched video title for naming.", default=None)
     parser.add_argument("--target_lang", help="Target language for translation (e.g., 'zh-CN', 'zh-Hans').", default=config.DEFAULT_TARGET_TRANSLATION_LANGUAGE)
+    parser.add_argument("--output_dir", help=f"Base directory for all output. Default: Creates '{default_output_folder_name}\' alongside the project directory.", default=default_output_dir_path)
+    parser.add_argument("--log_level", help="Set the logging level for the video-specific log file (DEBUG, INFO, WARNING, ERROR, CRITICAL)", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+
     args = parser.parse_args()
     load_dotenv()
-    video_id = get_video_id(args.video_url_or_id)
-    base_filename = args.output_basename if args.output_basename else video_id
-    print(f"Processing video: {video_id} (from input: {args.video_url_or_id})")
-    raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id)
-    if not raw_transcript_data:
-        print("Could not retrieve transcript. Exiting.")
-        return
-    print(f"Successfully fetched raw transcript in '{lang_code}' ({source_type}). Original segment count: {len(raw_transcript_data)}.")
-    print("Preprocessing and merging transcript segments...")
-    merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data)
-    if not merged_transcript_data:
-        print("Transcript data is empty after preprocessing and merging. Exiting.")
-        return
-    print(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
-    transcript_data_for_processing = merged_transcript_data
-    original_md = transcript_to_markdown(transcript_data_for_processing, lang_code, source_type, video_id)
-    original_md_filename = f"{base_filename}_original_merged_{lang_code}.md"
-    save_to_file(original_md, original_md_filename)
-    
-    # --- MODIFICATION: Temporarily comment out/remove skip for testing translation ---
-    # print("\nSkipping translation and generation of translated files as per request.")
-    # print(f"Original merged transcript (MD) saved to: {original_md_filename}")
-    # print("\nProcessing finished up to the original merged Markdown generation.")
-    # return # Exit main function early
-    # --- END OF MODIFICATION ---
 
-    # 2. Text segments for translation are now implicitly handled by new translate_text_segments
+    # Temporary logger setup for initial messages until video-specific path is known
+    # This basicConfig will affect the root logger, sending messages to console.
+    # We will create a more specific file logger for the video task later.
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+    logging.info(f"--- YouTube Translator script started for input: {args.video_url_or_id} ---")
+    logging.info(f"Target language: {args.target_lang}, Requested log level: {args.log_level}")
+    logging.info(f"Base output directory for all videos: {args.output_dir}")
+
+    video_id_for_transcript = get_video_id(args.video_url_or_id)
+    logging.info(f"Processing Video ID: {video_id_for_transcript}")
+
+    # Get video title (using the existing function, which now might use pytubefix)
+    # We'll pass a logger to it in the next step of refactoring.
+    video_title = get_youtube_video_title(args.video_url_or_id) # Placeholder for logger
+    sanitized_title = sanitize_filename(video_title)
+
+    specific_output_dir_name = sanitized_title
+    if video_title == video_id_for_transcript: # title fetch likely failed, used ID as fallback
+        logging.warning(f"Could not fetch a distinct video title; using video ID '{video_id_for_transcript}' for directory and filenames.")
+
+    file_basename_prefix = sanitize_filename(args.output_basename) if args.output_basename else specific_output_dir_name
+
+    video_output_path = os.path.join(args.output_dir, specific_output_dir_name)
+    try:
+        os.makedirs(video_output_path, exist_ok=True)
+        logging.info(f"Video-specific output directory: {video_output_path}")
+    except OSError as e_mkdir:
+        logging.critical(f"CRITICAL: Could not create video-specific output directory: {video_output_path}. Error: {e_mkdir}", exc_info=True)
+        return # Critical error, cannot proceed
+
+    # --- Setup video-specific file logger ---
+    log_file_name_base = sanitized_title if sanitized_title and sanitized_title != video_id_for_transcript else video_id_for_transcript
+    timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_file_name = f"{sanitize_filename(log_file_name_base)}_{timestamp_str}.log"
+    log_file_full_path = os.path.join(video_output_path, log_file_name)
+
+    numeric_log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    # Create a unique logger name for each video task to avoid conflicts if script is run multiple times
+    video_logger_name = f"VideoTask.{sanitize_filename(log_file_name_base)}.{timestamp_str}"
+    video_logger = setup_video_logger(video_logger_name, log_file_full_path, level=numeric_log_level)
     
-    # 3. Translate
-    print(f"\nStarting translation from '{lang_code}' to '{args.target_lang}' using new JSON method...")
+    video_logger.info(f"Video-specific logger initialized. Logging to file: {log_file_full_path}")
+    video_logger.info(f"Processing Video URL: {args.video_url_or_id}")
+    video_logger.info(f"Video ID for transcript: {video_id_for_transcript}")
+    video_logger.info(f"Fetched video title (used for naming): '{video_title}'")
+    video_logger.info(f"Target language for translation: {args.target_lang}")
+    video_logger.info(f"Output files will be prefixed with: '{file_basename_prefix}'")
+    # --- End of Video Logger Setup ---
+    
+    # Now, subsequent operations should use video_logger
+    raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id_for_transcript, logger=video_logger)
+
+    if not raw_transcript_data:
+        video_logger.error("Could not retrieve transcript. Exiting process for this video.")
+        return
+    video_logger.info(f"Successfully fetched raw transcript in '{lang_code}' ({source_type}). Original segment count: {len(raw_transcript_data)}.")
+    
+    video_logger.info("Starting preprocessing and merging of transcript segments...")
+    merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data, logger=video_logger)
+
+    if not merged_transcript_data:
+        video_logger.error("Transcript data is empty after preprocessing and merging. Exiting process for this video.")
+        return
+    video_logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
+    transcript_data_for_processing = merged_transcript_data
+    
+    original_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_original_merged_{lang_code}.md")
+    original_md = transcript_to_markdown(transcript_data_for_processing, lang_code, source_type, video_id_for_transcript, logger=video_logger)
+    save_to_file(original_md, original_md_filename, logger=video_logger)
+    
+    video_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}' using JSON method...")
     translated_texts = translate_text_segments(
         transcript_data_for_processing, 
         lang_code,                      
-        args.target_lang                
+        args.target_lang,
+        video_output_path, # Pass the video_output_path here for logging raw LLM responses
+        logger=video_logger 
     )
 
     if not translated_texts :
-        print("Translation failed or returned no segments. Exiting.")
+        video_logger.error("Translation failed or returned no segments. Exiting process for this video.")
         return
     if len(translated_texts) != len(transcript_data_for_processing):
-         print(f"Warning: Number of translated segments ({len(translated_texts)}) does not match original ({len(transcript_data_for_processing)}). Results might be incomplete or misaligned.")
+         video_logger.warning(f"Number of translated segments ({len(translated_texts)}) does not match original ({len(transcript_data_for_processing)}). Results might be incomplete or misaligned.")
 
-    translated_md_filename = f"{base_filename}_translated_{args.target_lang}.md"
-    translated_md_content = reconstruct_translated_markdown(transcript_data_for_processing, translated_texts, lang_code, source_type, args.target_lang, video_id)
-    save_to_file(translated_md_content, translated_md_filename)
+    translated_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{args.target_lang}.md")
+    translated_md_content = reconstruct_translated_markdown(transcript_data_for_processing, translated_texts, lang_code, source_type, args.target_lang, video_id_for_transcript, logger=video_logger)
+    save_to_file(translated_md_content, translated_md_filename, logger=video_logger)
 
-    translated_srt_filename = f"{base_filename}_translated_{args.target_lang}.srt"
-    translated_srt_content = reconstruct_translated_srt(transcript_data_for_processing, translated_texts)
-    save_to_file(translated_srt_content, translated_srt_filename)
+    translated_srt_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{args.target_lang}.srt")
+    translated_srt_content = reconstruct_translated_srt(transcript_data_for_processing, translated_texts, logger=video_logger)
+    save_to_file(translated_srt_content, translated_srt_filename, logger=video_logger)
 
+    video_logger.info("All tasks completed for this video!")
+    logging.info(f"--- YouTube Translator script finished for input: {args.video_url_or_id} ---") # Use basicConfig logger for final global message
+    
+    # The following print statements remain for direct console feedback in addition to logs.
     print("\nAll tasks completed!")
     print(f"Original transcript (MD): {original_md_filename}")
     print(f"Translated transcript (MD): {translated_md_filename}")
     print(f"Translated transcript (SRT): {translated_srt_filename}")
+    raw_llm_log_expected_filename = os.path.join(video_output_path, f"llm_raw_responses_{args.target_lang.lower().replace('-', '_')}.jsonl")
+    if os.path.exists(raw_llm_log_expected_filename):
+        print(f"Raw LLM responses log: {raw_llm_log_expected_filename}")
+    # Print path to the new video-specific log file
+    if log_file_full_path and os.path.exists(log_file_full_path):
+        print(f"Video processing log: {log_file_full_path}")
 
 if __name__ == "__main__":
     main()
