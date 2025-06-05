@@ -65,6 +65,7 @@ coverage.xml
 venv/
 ENV/
 env/
+venv_py312/
 
 # IDE / Editor specific files
 .idea/
