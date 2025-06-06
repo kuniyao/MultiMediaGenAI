@@ -19,7 +19,7 @@ def translate_text_segments(pre_translate_json_list,
     """
     logger_to_use = logger if logger else logging.getLogger(__name__)
 
-    logger_to_use.info(f"--- LLM Provider from config: {config.LLM_PROVIDER} ---")
+    logger_to_use.debug(f"--- LLM Provider from config: {config.LLM_PROVIDER} ---")
     
     if not pre_translate_json_list:
         logger_to_use.info("No segments to translate.")
@@ -52,7 +52,7 @@ def translate_text_segments(pre_translate_json_list,
         log_filename = f"llm_raw_responses_{target_lang.lower().replace('-', '_')}.jsonl"
         raw_llm_responses_log_file = os.path.join(video_specific_output_path, log_filename)
         os.makedirs(video_specific_output_path, exist_ok=True)
-        logger_to_use.info(f"Raw LLM API responses will be logged to: {raw_llm_responses_log_file}")
+        logger_to_use.debug(f"Raw LLM API responses will be logged to: {raw_llm_responses_log_file}")
 
     if config.LLM_PROVIDER == "gemini":
         api_key = os.getenv("GEMINI_API_KEY")
@@ -78,8 +78,8 @@ def translate_text_segments(pre_translate_json_list,
                 config.LLM_MODEL_GEMINI,
                 generation_config=generation_config
             ) 
-            logger_to_use.info(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode, temperature=0.0)." )
-            logger_to_use.info(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
+            logger_to_use.debug(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode, temperature=0.0)." )
+            logger_to_use.debug(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
 
             output_text_field_key = f"text_{target_lang.lower().replace('-', '_')}" 
 
@@ -120,40 +120,55 @@ def translate_text_segments(pre_translate_json_list,
                     f"JSON Request:\n```json\n{json.dumps(json_payload_for_prompt, indent=2, ensure_ascii=False)}\n```"
                 )
 
-            all_batches = []
-            current_batch_input_segments = [] 
             USE_SIMPLIFIED_IDS_EXPERIMENTAL = True
             if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
-                logger_to_use.info("Using SIMPLIFIED IDs (seg_N) for translation batches.")
+                logger_to_use.debug("Using SIMPLIFIED IDs (seg_N) for translation batches.")
 
-            for seg_obj in llm_input_segments:
-                potential_segments_for_this_batch = current_batch_input_segments + [seg_obj]
-                prompt_if_added = _construct_prompt_string_for_batch(
-                    potential_segments_for_this_batch, 
-                    source_lang_code, 
-                    target_lang, 
-                    output_text_field_key,
-                    use_simplified_ids=False 
-                )
-                try:
-                    num_tokens_if_added = model.count_tokens(prompt_if_added).total_tokens
-                except Exception as e_count:
-                    logger_to_use.warning(f"Token counting failed for a potential batch. Error: {e_count}. Proceeding with segment count only for this decision.", exc_info=True)
-                    if len(potential_segments_for_this_batch) > 10: 
-                         num_tokens_if_added = config.TARGET_PROMPT_TOKENS_PER_BATCH + 1 
-                    else:
-                         num_tokens_if_added = 1 
-
-                if current_batch_input_segments and \
-                   (num_tokens_if_added > config.TARGET_PROMPT_TOKENS_PER_BATCH or \
-                    len(potential_segments_for_this_batch) > config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH):
-                    all_batches.append(list(current_batch_input_segments))
-                    current_batch_input_segments = [seg_obj]
-                else:
-                    current_batch_input_segments.append(seg_obj)
+            # --- New, ultra-efficient batching logic (no API calls) ---
+            all_batches = []
+            current_batch_segments = []
             
-            if current_batch_input_segments:
-                all_batches.append(list(current_batch_input_segments))
+            # We now estimate token usage based on character count to avoid thousands of API calls.
+            # This is much faster and robust against network latency.
+            # A conservative estimate for characters per token. 2.5 is a safe bet for JSON with English.
+            CHARS_PER_TOKEN_ESTIMATE = 2.5 
+            TARGET_CHAR_COUNT_PER_BATCH = config.TARGET_PROMPT_TOKENS_PER_BATCH * CHARS_PER_TOKEN_ESTIMATE
+
+            # 1. Calculate the character count of the prompt template *without* any segments.
+            base_prompt_template = _construct_prompt_string_for_batch(
+                [], # Empty list of segments
+                source_lang_code, 
+                target_lang, 
+                output_text_field_key,
+                use_simplified_ids=USE_SIMPLIFIED_IDS_EXPERIMENTAL
+            )
+            current_batch_char_count = len(base_prompt_template)
+
+            # 2. Iterate through segments, adding their character cost to the current batch count.
+            for seg_obj in llm_input_segments:
+                # Estimate token cost of adding this segment by its character length in JSON form.
+                segment_json_str = json.dumps(seg_obj, ensure_ascii=False) + " , " 
+                segment_char_count = len(segment_json_str)
+
+                # Check if adding this segment would exceed limits
+                if current_batch_segments and \
+                   ((current_batch_char_count + segment_char_count > TARGET_CHAR_COUNT_PER_BATCH) or \
+                    (len(current_batch_segments) + 1 > config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH)):
+                    
+                    # Finalize the current batch
+                    all_batches.append(list(current_batch_segments))
+                    
+                    # Start a new batch with the current segment
+                    current_batch_segments = [seg_obj]
+                    current_batch_char_count = len(base_prompt_template) + segment_char_count
+                else:
+                    # Add the segment to the current batch
+                    current_batch_segments.append(seg_obj)
+                    current_batch_char_count += segment_char_count
+
+            # Add the last remaining batch to the list
+            if current_batch_segments:
+                all_batches.append(list(current_batch_segments))
 
             if all_batches:
                 logger_to_use.info(f"Prepared {len(all_batches)} batches for translation.")
@@ -257,26 +272,20 @@ def translate_text_segments(pre_translate_json_list,
                             translations_map[map_key] = translated_seg_item[output_text_field_key]
                         logger_to_use.info(f"Batch {batch_idx + 1} translated successfully.")
                     except json.JSONDecodeError as e_json:
-                        logger_to_use.error(f"  Error decoding JSON response from Gemini for batch {batch_idx+1}: {e_json}. Cleaned Raw Attempt: {(cleaned_json_str[:500] if cleaned_json_str else 'EMPTY_STRING_FOR_DECODE')}", exc_info=True)
-                        for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_JSON_DECODE] {seg['text_en']}"
-                    except Exception as e_resp_proc:
-                        logger_to_use.error(f"Error processing response from Gemini for batch {batch_idx+1}: {e_resp_proc}", exc_info=True)
-                        for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_RESP_PROCESSING] {seg['text_en']}"
-                except Exception as e_api_call:
-                    logger_to_use.error(f"An error occurred during Gemini API call for batch {batch_idx+1}: {e_api_call}. This might be due to the batch size exceeding model limits even after token counting.", exc_info=True)
-                    if raw_llm_responses_log_file:
-                        try:
-                            with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
-                                error_info = {"batch_index": batch_idx + 1, "status": "API_CALL_ERROR", "error_message": str(e_api_call)}
-                                f_raw.write(json.dumps(error_info) + '\n')
-                        except Exception as e_log_err:
-                            logger_to_use.warning(f"Could not write API call error to log file for batch {batch_idx + 1}: {e_log_err}", exc_info=True)
-                    for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[ERROR_API_CALL] {seg['text_en']}"
+                        logger_to_use.warning(f"Error decoding JSON for batch {batch_idx+1}: {e_json}. Raw response was: {cleaned_json_str[:500] if cleaned_json_str else 'EMPTY'}", exc_info=True)
+                        for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_JSON_DECODE_ERROR] {seg['text_en']}"
+                    except Exception as e:
+                        logger_to_use.error(f"Error during translation for batch {batch_idx+1}: {e}", exc_info=True)
+                        for seg in actual_batch_segments:
+                            translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_GENERAL_ERROR] {seg['text_en']}"
+                except Exception as e:
+                    logger_to_use.error(f"Error during translation for batch {batch_idx+1}: {e}", exc_info=True)
+                    for seg in actual_batch_segments:
+                        translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_GENERAL_ERROR] {seg['text_en']}"
                 
-                delay_seconds = getattr(config, 'LLM_REQUEST_DELAY', 0)
-                if delay_seconds > 0 and batch_idx < len(all_batches) - 1 :
-                    logger_to_use.info(f"Waiting for {delay_seconds}s before next batch...")
-                    time.sleep(delay_seconds)
+                if batch_idx < len(all_batches) - 1:
+                    logger_to_use.debug(f"Waiting for {config.SECONDS_BETWEEN_BATCHES}s before next batch...")
+                    time.sleep(config.SECONDS_BETWEEN_BATCHES)
 
             final_translated_json_objects = []
             for llm_id_key in llm_processing_ids_ordered:
@@ -307,28 +316,18 @@ def translate_text_segments(pre_translate_json_list,
             if len(final_translated_json_objects) != len(llm_input_segments):
                  logger_to_use.critical(f"Final translated object count ({len(final_translated_json_objects)}) MISMATCHES original segment count ({len(llm_input_segments)}).")
             
-            logger_to_use.info(f"--- Gemini JSON translation processing complete. --- ")
+            logger_to_use.debug(f"--- Gemini JSON translation processing complete. ---")
             return final_translated_json_objects
         except Exception as e:
-            logger_to_use.critical(f"A critical error occurred during Gemini JSON setup or outer processing loop: {e}", exc_info=True)
-            if raw_llm_responses_log_file:
-                try:
-                    with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
-                        error_info = {"batch_index": "CRITICAL_OUTER", "status": "CRITICAL_ERROR_TRANSLATING", "error_message": str(e)}
-                        f_raw.write(json.dumps(error_info) + '\n')
-                except Exception as e_log_crit:
-                    logger_to_use.warning(f"Could not write critical outer processing error to log file: {e_log_crit}", exc_info=True)
-            critical_error_results = []
+            logger_to_use.critical(f"A critical error occurred during the Gemini translation process setup: {e}", exc_info=True)
             for llm_item in llm_input_segments:
-                critical_error_results.append({
-                    "llm_processing_id": llm_item["id"],
-                    "translated_text": f"[CRITICAL_ERROR_TRANSLATING] {llm_item['text_en']}",
-                    "llm_info": {"error": f"Critical error: {str(e)[:100]}..."},
-                    "source_data": source_data_map.get(llm_item["id"])
-                })
-            return critical_error_results
+                 translations_map[_normalize_timestamp_id(llm_item["id"])] = f"[NO_TRANSLATION_CRITICAL_ERROR] {llm_item['text_en']}"
+        
+            logger_to_use.debug(f"--- Gemini JSON translation processing complete. ---")
+            return []
     else:
-        logger_to_use.warning(f"Unsupported or misconfigured LLM_PROVIDER: {config.LLM_PROVIDER}. Using simulated translation.")
+        logger_to_use.error(f"Unsupported LLM_PROVIDER: {config.LLM_PROVIDER}")
+        # Return a list of dicts with original text and error message
         simulated_results = []
         if raw_llm_responses_log_file:
             try:

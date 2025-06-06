@@ -43,7 +43,7 @@ def create_pre_translate_json_objects(processed_segments, video_id, original_lan
         }
         output_json_objects.append(json_obj)
     
-    logger_to_use.info(f"Created {len(output_json_objects)} JSON objects for pre-translation.")
+    logger_to_use.debug(f"Created {len(output_json_objects)} JSON objects for pre-translation.")
     return output_json_objects
 
 def save_json_objects_to_jsonl(json_objects, output_filepath, logger=None):
@@ -57,7 +57,7 @@ def save_json_objects_to_jsonl(json_objects, output_filepath, logger=None):
         with open(output_filepath, 'w', encoding='utf-8') as f:
             for json_obj in json_objects:
                 f.write(json.dumps(json_obj, ensure_ascii=False) + '\n')
-        logger_to_use.info(f"Successfully saved {len(json_objects)} JSON objects to {output_filepath}")
+        logger_to_use.debug(f"Successfully saved {len(json_objects)} JSON objects to {output_filepath}")
         return True
     except IOError as e:
         logger_to_use.error(f"Failed to save JSON objects to {output_filepath}: {e}", exc_info=True)

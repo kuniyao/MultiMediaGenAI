@@ -33,6 +33,6 @@ def save_to_file(content, filename, logger=None):
     try:
         with open(filename, 'w', encoding='utf-8') as f:
             f.write(content)
-        logger_to_use.info(f"Successfully saved to {filename}")
+        logger_to_use.debug(f"Successfully saved to {filename}")
     except IOError as e:
         logger_to_use.error(f"Error saving file {filename}: {e}", exc_info=True) 

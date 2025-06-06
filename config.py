@@ -31,7 +31,7 @@ MAX_SEGMENTS_PER_GEMINI_JSON_BATCH = 100 # Max segments in a single batch for Ge
 SEGMENT_SEPARATOR = "\n<segment_separator_youtube_translator>\n"
 
 # LLM Request Delay
-LLM_REQUEST_DELAY = 1 # Seconds to wait between batch API calls
+SECONDS_BETWEEN_BATCHES = 1 # Seconds to wait between batch API calls
 
 # === New Configurations for Transcript Segment Merging ===
 # Maximum duration in seconds for a merged transcript segment.

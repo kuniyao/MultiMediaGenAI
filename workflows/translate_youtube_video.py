@@ -30,14 +30,7 @@ from common_utils.json_handler import create_pre_translate_json_objects, save_js
 # Placeholder for the YouTube translation workflow
 
 # --- Global Logger for general script messages (console output) ---
-global_logger = logging.getLogger("GlobalYoutubeTranslatorWorkflow") # Changed name slightly for clarity
-global_logger.setLevel(logging.INFO)
-console_handler = logging.StreamHandler()
-console_formatter = logging.Formatter('%(asctime)s - %(levelname)s - WORKFLOW - %(message)s') # Changed format slightly
-console_handler.setFormatter(console_formatter)
-if not global_logger.handlers:
-    global_logger.addHandler(console_handler)
-global_logger.propagate = False # Prevent messages from being passed to the root logger
+# This logger is now removed. All logging will be handled by the task_logger.
 # --- End of Global Logger Setup ---
 
 def main():
@@ -71,44 +64,44 @@ def main():
     else:
         load_dotenv() # Fallback to default search paths if .env isn't in project root
 
-    # This basicConfig will affect the root logger, sending messages to console.
-    # This might be redundant if global_logger is already set up and we don't want root logger interference.
-    # For now, keeping it as it was, but consider if it's needed with dedicated global_logger.
-    logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - CONSOLE_ROOT - %(message)s', force=True)
-
-    global_logger.info(f"--- YouTube Translator workflow started for input: {args.video_url_or_id} ---")
-
-    video_id_for_transcript = get_video_id(args.video_url_or_id)
+    # --- Logger Setup ---
+    # We set up the main logger for the task early, so all subsequent messages are captured.
+    video_id_for_naming = get_video_id(args.video_url_or_id) # Need this early for logger name
+    temp_title_for_naming = get_youtube_video_title(args.video_url_or_id, logger=None) # Fetch title for naming
     
-    # The first call to get_youtube_video_title uses its own module logger if logger is None (as modified).
-    # For initial user feedback, we can use global_logger here if desired, or rely on its internal logging.
-    video_title = get_youtube_video_title(args.video_url_or_id, logger=global_logger) 
-    sanitized_title = sanitize_filename(video_title)
-
-    specific_output_dir_name = sanitized_title
-    if video_title == video_id_for_transcript: 
-        global_logger.warning(f"Could not fetch a distinct video title; using video ID '{video_id_for_transcript}' for directory and filenames.")
-
-    file_basename_prefix = sanitize_filename(args.output_basename) if args.output_basename else specific_output_dir_name
+    sanitized_title_for_naming = sanitize_filename(temp_title_for_naming)
+    specific_output_dir_name = sanitized_title_for_naming
+    if temp_title_for_naming == video_id_for_naming:
+        # This warning can be logged to a temporary basic logger if needed, but for now, we proceed.
+        # It will be logged again by the main task_logger shortly.
+        pass
 
     video_output_path = os.path.join(args.output_dir, specific_output_dir_name)
-    try:
-        os.makedirs(video_output_path, exist_ok=True)
-        global_logger.info(f"Video-specific output directory: {video_output_path}")
-    except OSError as e_mkdir:
-        global_logger.critical(f"CRITICAL: Could not create video-specific output directory: {video_output_path}. Error: {e_mkdir}", exc_info=True)
-        return 
+    os.makedirs(video_output_path, exist_ok=True) # Create dir early for the log file
 
-    log_file_name_base = sanitized_title if sanitized_title and sanitized_title != video_id_for_transcript else video_id_for_transcript
+    log_file_name_base = sanitized_title_for_naming if sanitized_title_for_naming and sanitized_title_for_naming != video_id_for_naming else video_id_for_naming
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file_name = f"{sanitize_filename(log_file_name_base)}_{timestamp_str}.log"
     log_file_full_path = os.path.join(video_output_path, log_file_name)
 
     numeric_log_level = getattr(logging, args.log_level.upper(), logging.INFO)
     task_logger_name = f"VideoTaskWorkflow.{sanitize_filename(log_file_name_base)}.{timestamp_str}"
+    # The single, unified logger for this workflow run.
     task_logger = setup_task_logger(task_logger_name, log_file_full_path, level=numeric_log_level)
     
+    task_logger.info(f"--- YouTube Translator workflow started for input: {args.video_url_or_id} ---")
+    task_logger.info(f"Video-specific output directory created: {video_output_path}")
     task_logger.info(f"Task-specific logger initialized. Logging to file: {log_file_full_path}")
+    
+    # Now we can proceed with the main logic, using the task_logger for all messages.
+    video_id_for_transcript = video_id_for_naming # We already fetched this
+    video_title = temp_title_for_naming # We already fetched this
+
+    if video_title == video_id_for_transcript: 
+        task_logger.warning(f"Could not fetch a distinct video title; using video ID '{video_id_for_transcript}' for directory and filenames.")
+
+    file_basename_prefix = sanitize_filename(args.output_basename) if args.output_basename else specific_output_dir_name
+    
     task_logger.info(f"Processing Video URL: {args.video_url_or_id}")
     task_logger.info(f"Video ID for transcript: {video_id_for_transcript}")
     task_logger.info(f"Fetched video title (used for naming): '{video_title}'")
@@ -119,17 +112,15 @@ def main():
 
     if not raw_transcript_data:
         task_logger.error("Could not retrieve transcript. Exiting process for this video.")
-        global_logger.error(f"Failed to retrieve transcript for {video_id_for_transcript}.") # Also inform global/console
         return
-    global_logger.info(f"Successfully fetched {source_type} transcript in '{lang_code}'.")
+    task_logger.info(f"Successfully fetched {source_type} transcript in '{lang_code}'.")
     
     merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data, logger=task_logger)
 
     if not merged_transcript_data:
         task_logger.error("Transcript data is empty after preprocessing and merging. Exiting process for this video.")
-        global_logger.error(f"Preprocessing of transcript for {video_id_for_transcript} resulted in empty data.")
         return
-    global_logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
+    task_logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
     transcript_data_for_processing = merged_transcript_data
     
     original_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_original_merged_{lang_code}.md")
@@ -148,18 +139,14 @@ def main():
 
     if not pre_translate_json_objects:
         task_logger.error("No JSON objects were created for pre-translation. Skipping translation.")
-        global_logger.error(f"Failed to create pre-translation JSON for {video_id_for_transcript}.")
         return
 
     pre_translate_jsonl_filename = os.path.join(video_output_path, f"{file_basename_prefix}_pre_translate_{lang_code}.jsonl")
-    if save_json_objects_to_jsonl(pre_translate_json_objects, pre_translate_jsonl_filename, logger=task_logger):
-        task_logger.info(f"Successfully saved pre-translate JSON objects to: {pre_translate_jsonl_filename}")
-        global_logger.info(f"Pre-translation JSONL file saved: {pre_translate_jsonl_filename}")
-    else:
+    if not save_json_objects_to_jsonl(pre_translate_json_objects, pre_translate_jsonl_filename, logger=task_logger):
         task_logger.error(f"Failed to save pre-translate JSON objects to: {pre_translate_jsonl_filename}. Proceeding with in-memory data for translation if available, but this indicates an issue.")
         # Depending on strictness, you might choose to return here if saving fails.
     
-    global_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}'...")
+    task_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}'...")
     # IMPORTANT: The first argument to translate_text_segments is now pre_translate_json_objects.
     # The translate_text_segments function itself will need to be updated in the next step
     # to correctly process this new list of rich JSON objects.
@@ -173,16 +160,12 @@ def main():
 
     if not translated_json_objects :
         task_logger.error("Translation failed or returned no segments. Exiting process for this video.")
-        global_logger.error(f"Translation failed for {video_id_for_transcript}.")
         return
-    global_logger.info("Translation processing complete.")
+    task_logger.info("Translation processing complete.")
 
     # --- (Optional) Save Post-Translate JSONL --- 
     post_translate_jsonl_filename = os.path.join(video_output_path, f"{file_basename_prefix}_post_translate_{args.target_lang}.jsonl")
-    if save_json_objects_to_jsonl(translated_json_objects, post_translate_jsonl_filename, logger=task_logger):
-        task_logger.info(f"Successfully saved post-translate JSON objects to: {post_translate_jsonl_filename}")
-        global_logger.info(f"Post-translation JSONL file saved: {post_translate_jsonl_filename}")
-    else:
+    if not save_json_objects_to_jsonl(translated_json_objects, post_translate_jsonl_filename, logger=task_logger):
         task_logger.warning(f"Failed to save post-translate JSON objects to: {post_translate_jsonl_filename}. This is not critical for SRT/MD generation if data is in memory.")
 
     # Check if the number of translated segments matches the number of input segments
@@ -213,21 +196,21 @@ def main():
     save_to_file(translated_srt_content, translated_srt_filename, logger=task_logger)
 
     task_logger.info("All tasks completed for this video!")
-    global_logger.info(f"--- YouTube Translator workflow finished for input: {args.video_url_or_id} ---")
+    task_logger.info(f"--- YouTube Translator workflow finished for input: {args.video_url_or_id} ---")
     
-    print("\nAll tasks completed!")
-    print(f"Original transcript (MD): {original_md_filename}")
-    print(f"Translated transcript (MD): {translated_md_filename}")
-    print(f"Translated transcript (SRT): {translated_srt_filename}")
+    task_logger.info("\n--- Summary of Output Files ---")
+    task_logger.info(f"Original transcript (MD): {original_md_filename}")
+    task_logger.info(f"Translated transcript (MD): {translated_md_filename}")
+    task_logger.info(f"Translated transcript (SRT): {translated_srt_filename}")
     if os.path.exists(pre_translate_jsonl_filename):
-        print(f"Pre-translation data (JSONL): {pre_translate_jsonl_filename}")
+        task_logger.info(f"Pre-translation data (JSONL): {pre_translate_jsonl_filename}")
     if os.path.exists(post_translate_jsonl_filename):
-        print(f"Post-translation data (JSONL): {post_translate_jsonl_filename}")
+        task_logger.info(f"Post-translation data (JSONL): {post_translate_jsonl_filename}")
     raw_llm_log_expected_filename = os.path.join(video_output_path, f"llm_raw_responses_{args.target_lang.lower().replace('-', '_')}.jsonl")
     if os.path.exists(raw_llm_log_expected_filename):
-        print(f"Raw LLM responses log: {raw_llm_log_expected_filename}")
+        task_logger.info(f"Raw LLM responses log: {raw_llm_log_expected_filename}")
     if log_file_full_path and os.path.exists(log_file_full_path):
-        print(f"Video processing log: {log_file_full_path}")
+        task_logger.info(f"Video processing log: {log_file_full_path}")
 
 if __name__ == "__main__":
     main() 

@@ -29,6 +29,11 @@ graph TD;
     E --> G["format_converters<br/>生成翻译后的 MD 文件"];
 ```
 
+## 近期改进 (Recent Improvements)
+
+- **日志系统重构**: 优化了终端输出，默认只显示核心的工作流进度信息（如"开始"、"获取字幕"、"批次翻译中"等），使得输出更简洁、清晰。所有详细的技术日志（如文件保存、API参数、数据处理细节）都被记录在独立的日志文件中，方便问题排查。
+- **性能优化**: 彻底解决了在处理长视频时（数千个字幕片段），因准备翻译批次效率低下而导致的长时间（数十分钟）延迟问题。通过优化批处理算法，准备时间已从分钟级降至秒级。
+
 ## 未来规划 (Future Plans)
 
 - **[ ] 书籍翻译功能**: 扩展工作流，支持导入文本文件（如 `.txt`, `.epub`），并进行自动化翻译。
@@ -66,12 +71,29 @@ pip install -r requirements.txt
 
 ### 2. 配置
 
-在项目根目录创建一个 `config.py` 文件或者 `.env` 文件，用于存放敏感信息和配置项，例如：
+在项目根目录创建一个 `config.py` 文件或者 `.env` 文件，用于存放敏感信息和配置项。一个更完整的 `config.py`示例如下：
 
 ```python
-# config.py
-LLM_API_KEY = "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-TARGET_LANGUAGE = "Chinese"
+# config.py 示例
+
+# LLM 提供商设置
+LLM_PROVIDER = "gemini"  # 可选: "gemini", "openai", etc.
+LLM_MODEL_GEMINI = "gemini-1.5-flash-preview-0514" # 使用的 Gemini 模型
+
+# API 密钥 (通过 .env 文件加载更安全)
+# GEMINI_API_KEY = "your-gemini-api-key"
+
+# 翻译偏好设置
+DEFAULT_TARGET_TRANSLATION_LANGUAGE = "zh-CN" # 默认目标翻译语言
+PREFERRED_TRANSCRIPT_LANGUAGES = ['en'] # 优先获取的字幕语言列表
+
+# LLM 请求与批处理设置
+# 每个翻译批次之间的等待时间（秒）
+SECONDS_BETWEEN_BATCHES = 1
+# 单个批次可包含的最大字幕片段数量
+MAX_SEGMENTS_PER_GEMINI_JSON_BATCH = 100
+# 目标单个批次 Prompt 的最大 token 数量 (这是一个估算值)
+TARGET_PROMPT_TOKENS_PER_BATCH = 250000
 ```
 
 ### 3. 运行工作流
