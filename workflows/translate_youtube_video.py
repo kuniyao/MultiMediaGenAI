@@ -25,7 +25,7 @@ from common_utils.log_config import setup_task_logger
 from format_converters.core import transcript_to_markdown, reconstruct_translated_srt, reconstruct_translated_markdown
 from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, get_youtube_transcript, preprocess_and_merge_segments
 from llm_utils.translator import translate_text_segments
-from processing.json_handler import create_pre_translate_json_objects, save_json_objects_to_jsonl, load_json_objects_from_jsonl
+from common_utils.json_handler import create_pre_translate_json_objects, save_json_objects_to_jsonl, load_json_objects_from_jsonl
 
 # Placeholder for the YouTube translation workflow
 

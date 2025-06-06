@@ -7,5 +7,4 @@ requests==2.32.3
 urllib3==2.4.0
 youtube-transcript-api==1.0.3
 google-generativeai
-# pytube # Commented out or removed
 pytubefix
