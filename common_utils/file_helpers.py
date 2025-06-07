@@ -1,6 +1,25 @@
 import re
 import string
 import logging
+from pathlib import Path
+
+from common_utils.time_utils import format_time
+
+
+def write_srt_file(subtitle_segments, output_path: Path):
+    """
+    Writes a list of subtitle segments to an SRT file.
+    """
+    with open(output_path, 'w', encoding='utf-8') as f:
+        for i, sub in enumerate(subtitle_segments):
+            start_time = format_time(sub['start'])
+            end_time = format_time(sub['end'])
+            # Use the 'translation' field for the text
+            text = sub.get('translation', sub.get('text', ''))
+            
+            f.write(f"{i + 1}\n")
+            f.write(f"{start_time} --> {end_time}\n")
+            f.write(f"{text}\n\n")
 
 # Placeholder for file helper functions
 def sanitize_filename(filename):

@@ -76,4 +76,7 @@ venv_py312/
 
 # OS generated files
 .DS_Store
-Thumbs.db 
+Thumbs.db
+
+# Custom
+outputs/ 

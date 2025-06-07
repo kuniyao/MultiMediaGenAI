@@ -7,6 +7,12 @@ import json
 import time
 import config # Assuming config.py is in the PYTHONPATH or project root
 from format_converters.core import format_time, _normalize_timestamp_id
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env file from project root
+project_root = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=project_root / '.env')
 
 def translate_text_segments(pre_translate_json_list,
                             source_lang_code, 
@@ -347,3 +353,93 @@ def translate_text_segments(pre_translate_json_list,
             })
         logger_to_use.info("--- Simulated translation complete ---")
         return simulated_results 
+
+class Translator:
+    def __init__(self, model_name=None, proxy=None):
+        self.provider = config.LLM_PROVIDER
+        self.proxy = proxy
+        self.logger = logging.getLogger(__name__)
+
+        if self.provider == "gemini":
+            self.model_name = model_name or config.LLM_MODEL_GEMINI
+            api_key = os.getenv("GEMINI_API_KEY")
+            if not api_key:
+                raise ValueError("GEMINI_API_KEY not found in environment variables.")
+            genai.configure(api_key=api_key)
+            generation_config = genai.types.GenerationConfig(
+                response_mime_type="application/json",
+                temperature=0.0
+            )
+            self.client = genai.GenerativeModel(
+                self.model_name,
+                generation_config=generation_config
+            )
+            self.logger.info(f"Gemini Translator initialized with model: {self.model_name}")
+        else:
+            raise ValueError(f"Unsupported LLM provider: {self.provider}")
+
+    def _construct_prompt(self, segments_batch, target_lang):
+        output_key = f"text_{target_lang.lower().replace('-', '_')}"
+        instructions = (
+            f"Objective: Translate the 'text' field of each segment object to {target_lang}. "
+            f"Output Format: A JSON object with a single key 'translated_segments'. Its value must be an array of objects. "
+            f"Each object must retain the original 'id' and include the translated text in a new field named '{output_key}'. "
+            f"CRITICAL: The 'id' MUST be returned EXACTLY as provided. The number of output objects must exactly match the number of input segments."
+        )
+        prompt_payload = {
+            "target_language": target_lang,
+            "instructions": instructions,
+            "segments": segments_batch
+        }
+        return json.dumps(prompt_payload, indent=2, ensure_ascii=False)
+
+    def translate_text_batches(self, segments, batch_size=config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH, target_lang="zh-CN"):
+        if not segments:
+            return []
+
+        all_translated_texts = []
+        original_texts_map = {str(i): seg['text'] for i, seg in enumerate(segments)}
+
+        for i in range(0, len(segments), batch_size):
+            batch_segments_raw = segments[i:i + batch_size]
+            
+            # Add a simple integer ID for re-mapping
+            batch_for_prompt = [{"id": str(i + j), "text": seg['text']} for j, seg in enumerate(batch_segments_raw)]
+
+            self.logger.info(f"Translating batch {i//batch_size + 1}/{-(-len(segments)//batch_size)}...")
+            
+            prompt = self._construct_prompt(batch_for_prompt, target_lang)
+            
+            try:
+                response = self.client.generate_content(prompt)
+                response_text = response.text
+                
+                translated_data = json.loads(response_text)
+                translated_segments = translated_data.get('translated_segments', [])
+
+                batch_translations = {}
+                output_key = f"text_{target_lang.lower().replace('-', '_')}"
+                for item in translated_segments:
+                    batch_translations[item['id']] = item.get(output_key, "")
+
+                # Re-order based on original batch order
+                for seg_info in batch_for_prompt:
+                    seg_id = seg_info['id']
+                    translated_text = batch_translations.get(seg_id)
+                    if translated_text:
+                        all_translated_texts.append(translated_text)
+                    else:
+                        self.logger.warning(f"Translation missing for segment id {seg_id}. Using original.")
+                        all_translated_texts.append(original_texts_map[seg_id])
+
+            except Exception as e:
+                self.logger.error(f"Error translating batch: {e}", exc_info=True)
+                # On error, use original text for the entire batch
+                all_translated_texts.extend([seg['text'] for seg in batch_segments_raw])
+
+        return all_translated_texts
+
+    def translate_text(self, texts, target_lang="zh-CN"):
+        # This can be deprecated or updated to use the batched method
+        segments_for_translation = [{"text": text} for text in texts]
+        return self.translate_text_batches(segments_for_translation, target_lang=target_lang)
