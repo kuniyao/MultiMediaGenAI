@@ -24,7 +24,7 @@ from common_utils.file_helpers import sanitize_filename, save_to_file
 from common_utils.log_config import setup_task_logger
 from format_converters.core import transcript_to_markdown, reconstruct_translated_srt, reconstruct_translated_markdown
 from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, get_youtube_transcript, preprocess_and_merge_segments
-from llm_utils.translator import translate_text_segments
+from llm_utils.translator import Translator
 from common_utils.json_handler import create_pre_translate_json_objects, save_json_objects_to_jsonl, load_json_objects_from_jsonl
 
 # Placeholder for the YouTube translation workflow
@@ -146,16 +146,16 @@ def main():
         task_logger.error(f"Failed to save pre-translate JSON objects to: {pre_translate_jsonl_filename}. Proceeding with in-memory data for translation if available, but this indicates an issue.")
         # Depending on strictness, you might choose to return here if saving fails.
     
+    # FINAL UPDATE: Instantiate and use the final unified Translator class
+    task_logger.info("Instantiating unified translator...")
+    translator = Translator(logger=task_logger)
+
     task_logger.info(f"Starting translation from '{lang_code}' to '{args.target_lang}'...")
-    # IMPORTANT: The first argument to translate_text_segments is now pre_translate_json_objects.
-    # The translate_text_segments function itself will need to be updated in the next step
-    # to correctly process this new list of rich JSON objects.
-    translated_json_objects = translate_text_segments(
-        pre_translate_json_objects, # CHANGED: Passing the list of rich JSON objects
-        lang_code,                      
-        args.target_lang,
-        video_output_path, 
-        logger=task_logger
+    translated_json_objects = translator.translate_segments(
+        pre_translate_json_list=pre_translate_json_objects,
+        source_lang_code=lang_code,
+        target_lang=args.target_lang,
+        video_specific_output_path=video_output_path
     )
 
     if not translated_json_objects :

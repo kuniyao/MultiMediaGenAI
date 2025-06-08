@@ -4,76 +4,38 @@ import os
 import logging
 import google.generativeai as genai
 import json
-import time
-import config # Assuming config.py is in the PYTHONPATH or project root
-from format_converters.core import format_time, _normalize_timestamp_id
+import config
+from format_converters.core import _normalize_timestamp_id
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Import the new refactored modules
+from .prompt_builder import construct_prompt_for_batch
+from .batching import create_batches_by_char_limit
+from .response_parser import parse_and_validate_response
 
 # Load .env file from project root
 project_root = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=project_root / '.env')
 
-def translate_text_segments(pre_translate_json_list,
-                            source_lang_code, 
-                            target_lang="zh-CN",
-                            video_specific_output_path=None,
-                            logger=None):
+class Translator:
     """
-    Translates a list of processed transcript segments (with text, start, duration)
-    using the configured LLM provider, via batched JSON objects.
+    A unified class to handle translation using the Google Gemini API.
+    It encapsulates model initialization, batching, prompt construction,
+    API calls, and response parsing, operating on a standardized rich data format
+    to ensure metadata (like timestamps) is preserved.
     """
-    logger_to_use = logger if logger else logging.getLogger(__name__)
+    def __init__(self, logger=None):
+        self.logger = logger if logger else logging.getLogger(__name__)
+        self.model = self._initialize_model()
 
-    logger_to_use.debug(f"--- LLM Provider from config: {config.LLM_PROVIDER} ---")
-    
-    if not pre_translate_json_list:
-        logger_to_use.info("No segments to translate.")
-        return []
-
-    llm_input_segments = []
-    source_data_map = {}
-    llm_processing_ids_ordered = []
-
-    for item in pre_translate_json_list:
-        llm_id = item.get("llm_processing_id")
-        text = item.get("text_to_translate")
-        source_data = item.get("source_data")
-
-        if not llm_id or text is None:
-            logger_to_use.warning(f"Skipping item due to missing 'llm_processing_id' or 'text_to_translate': {item.get('segment_guid', 'Unknown GUID')}")
-            continue
-        
-        llm_input_segments.append({
-            "id": llm_id,
-            "text_en": text 
-        })
-        source_data_map[llm_id] = source_data
-        llm_processing_ids_ordered.append(llm_id)
-
-    translations_map = {} 
-
-    raw_llm_responses_log_file = None
-    if video_specific_output_path:
-        log_filename = f"llm_raw_responses_{target_lang.lower().replace('-', '_')}.jsonl"
-        raw_llm_responses_log_file = os.path.join(video_specific_output_path, log_filename)
-        os.makedirs(video_specific_output_path, exist_ok=True)
-        logger_to_use.debug(f"Raw LLM API responses will be logged to: {raw_llm_responses_log_file}")
-
-    if config.LLM_PROVIDER == "gemini":
+    def _initialize_model(self):
+        """Initializes and configures the Gemini model."""
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            logger_to_use.error("GEMINI_API_KEY not found. Translation will be skipped.")
-            skipped_translation_results = []
-            for llm_item in llm_input_segments:
-                skipped_translation_results.append({
-                    "llm_processing_id": llm_item["id"],
-                    "translated_text": f"[SKIPPED_NO_KEY] {llm_item['text_en']}",
-                    "llm_info": {"error": "GEMINI_API_KEY not found"},
-                    "source_data": source_data_map.get(llm_item["id"])
-                })
-            return skipped_translation_results
-
+            self.logger.error("GEMINI_API_KEY not found. Translation will be skipped.")
+            return None
+        
         try:
             genai.configure(api_key=api_key)
             generation_config = genai.types.GenerationConfig(
@@ -83,363 +45,202 @@ def translate_text_segments(pre_translate_json_list,
             model = genai.GenerativeModel(
                 config.LLM_MODEL_GEMINI,
                 generation_config=generation_config
-            ) 
-            logger_to_use.debug(f"Using Gemini model: {config.LLM_MODEL_GEMINI} for translation from '{source_lang_code}' to '{target_lang}' (JSON mode, temperature=0.0)." )
-            logger_to_use.debug(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
-
-            output_text_field_key = f"text_{target_lang.lower().replace('-', '_')}" 
-
-            def _construct_prompt_string_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key, use_simplified_ids=False):
-                if use_simplified_ids:
-                    example_id_format = "seg_N (e.g., 'seg_0', 'seg_1', ... 'seg_99')"
-                    id_preservation_instruction = (
-                        f"CRITICAL ID PRESERVATION: The 'id' field is a simplified segment identifier (format: {example_id_format}). "
-                        f"You MUST return this 'id' string EXACTLY as it was provided in the input for each segment. DO NOT alter or omit the 'id'. "
-                        "The 'id' ensures segments are correctly mapped back after translation."
-                    )
-                else: # Original behavior
-                    example_id_format = "HH:MM:SS,mmm --> HH:MM:SS,mmm (e.g., '00:01:23,456 --> 00:01:25,789')"
-                    id_preservation_instruction = (
-                        f"CRITICAL ID PRESERVATION: The 'id' field is a precise timestamp string (format: {example_id_format}). "
-                        f"You MUST return this 'id' string EXACTLY as it was provided in the input for each segment. DO NOT alter, reformat, or change any part of the 'id' string, including numbers, colons, commas, spaces, or the '-->' separator. "
-                    )
-                
-                instruction_text_for_payload = (
-                    f"Objective: Translate the 'text_en' field of each segment object from {src_lang} to {tgt_lang}. "
-                    f"Output Format: A JSON object with a single key 'translated_segments'. This key's value must be an array of objects. "
-                    f"Each object in this output array must retain the original 'id' from the input segment and include the translated text in a new field named '{out_text_key}'."
-                    f"{id_preservation_instruction} " 
-                    "The segments are ordered chronologically and provide context for each other. "
-                    "CRITICAL REQUIREMENT: The number of objects in the 'translated_segments' array MUST EXACTLY MATCH the number of input segments. If the counts do not match, the entire translation for this batch will be discarded. Do not split a single input segment into multiple translated segments in the output array. Maintain a strict one-to-one correspondence."
-                )
-                json_payload_for_prompt = {
-                    "source_language": src_lang,
-                    "target_language": tgt_lang,
-                    "instructions": instruction_text_for_payload, 
-                    "segments": segments_list_for_payload
-                }
-                return (
-                    f"Your task is to process the following JSON request. The 'instructions' field within the JSON details the primary objective: "
-                    f"to translate text segments from {src_lang} to {tgt_lang}. "
-                    "You MUST return a single, valid JSON object that strictly follows the output structure described in the 'instructions' field of the request. "
-                    "Pay EXTREME ATTENTION to the ID PRESERVATION requirement detailed in the instructions: the 'id' field for each segment in your response MUST be an IDENTICAL, UNCHANGED copy of the 'id' field from the input segment.\n\n"
-                    f"JSON Request:\n```json\n{json.dumps(json_payload_for_prompt, indent=2, ensure_ascii=False)}\n```"
-                )
-
-            USE_SIMPLIFIED_IDS_EXPERIMENTAL = True
-            if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
-                logger_to_use.debug("Using SIMPLIFIED IDs (seg_N) for translation batches.")
-
-            # --- New, ultra-efficient batching logic (no API calls) ---
-            all_batches = []
-            current_batch_segments = []
-            
-            # We now estimate token usage based on character count to avoid thousands of API calls.
-            # This is much faster and robust against network latency.
-            # A conservative estimate for characters per token. 2.5 is a safe bet for JSON with English.
-            CHARS_PER_TOKEN_ESTIMATE = 2.5 
-            TARGET_CHAR_COUNT_PER_BATCH = config.TARGET_PROMPT_TOKENS_PER_BATCH * CHARS_PER_TOKEN_ESTIMATE
-
-            # 1. Calculate the character count of the prompt template *without* any segments.
-            base_prompt_template = _construct_prompt_string_for_batch(
-                [], # Empty list of segments
-                source_lang_code, 
-                target_lang, 
-                output_text_field_key,
-                use_simplified_ids=USE_SIMPLIFIED_IDS_EXPERIMENTAL
             )
-            current_batch_char_count = len(base_prompt_template)
-
-            # 2. Iterate through segments, adding their character cost to the current batch count.
-            for seg_obj in llm_input_segments:
-                # Estimate token cost of adding this segment by its character length in JSON form.
-                segment_json_str = json.dumps(seg_obj, ensure_ascii=False) + " , " 
-                segment_char_count = len(segment_json_str)
-
-                # Check if adding this segment would exceed limits
-                if current_batch_segments and \
-                   ((current_batch_char_count + segment_char_count > TARGET_CHAR_COUNT_PER_BATCH) or \
-                    (len(current_batch_segments) + 1 > config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH)):
-                    
-                    # Finalize the current batch
-                    all_batches.append(list(current_batch_segments))
-                    
-                    # Start a new batch with the current segment
-                    current_batch_segments = [seg_obj]
-                    current_batch_char_count = len(base_prompt_template) + segment_char_count
-                else:
-                    # Add the segment to the current batch
-                    current_batch_segments.append(seg_obj)
-                    current_batch_char_count += segment_char_count
-
-            # Add the last remaining batch to the list
-            if current_batch_segments:
-                all_batches.append(list(current_batch_segments))
-
-            if all_batches:
-                logger_to_use.info(f"Prepared {len(all_batches)} batches for translation.")
-            else:
-                logger_to_use.info("No batches to translate.") 
-
-            for batch_idx, actual_batch_segments in enumerate(all_batches):
-                if not actual_batch_segments:
-                    continue
-                logger_to_use.info(f"Translating batch {batch_idx + 1}/{len(all_batches)}...")
-                
-                segments_for_payload_this_batch = []
-                if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
-                    for i, seg_data in enumerate(actual_batch_segments):
-                        segments_for_payload_this_batch.append({
-                            "id": f"seg_{i}",
-                            "text_en": seg_data["text_en"]
-                        })
-                else:
-                    segments_for_payload_this_batch = actual_batch_segments
-
-                prompt_to_send = _construct_prompt_string_for_batch(
-                    segments_for_payload_this_batch, 
-                    source_lang_code, 
-                    target_lang, 
-                    output_text_field_key,
-                    use_simplified_ids=USE_SIMPLIFIED_IDS_EXPERIMENTAL
-                )
-                
-                try:
-                    response = model.generate_content(prompt_to_send)
-                    if raw_llm_responses_log_file:
-                        try:
-                            raw_text_to_log = response.text if hasattr(response, 'text') and response.text else None
-                            if raw_text_to_log:
-                                with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
-                                    f_raw.write(raw_text_to_log + '\n')
-                            else:
-                                with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
-                                    placeholder_log = {"batch_index": batch_idx + 1, "status": "EMPTY_RESPONSE_TEXT", "has_parts": bool(response.parts if hasattr(response, 'parts') else False)}
-                                    f_raw.write(json.dumps(placeholder_log) + '\n')
-                        except Exception as e_log:
-                            logger_to_use.warning(f"Could not write raw LLM response for batch {batch_idx + 1} to log file: {e_log}", exc_info=True)
-
-                    if not response.parts:
-                         logger_to_use.warning(f"Gemini response for batch {batch_idx+1} has no parts. Using originals.")
-                         for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_EMPTY_RESPONSE] {seg['text_en']}"
-                         continue
-                    try:
-                        translated_json_str = response.text 
-                        cleaned_json_str = translated_json_str.strip()
-                        if cleaned_json_str.startswith('{') and cleaned_json_str.endswith('}'):
-                            if cleaned_json_str.count('}') == cleaned_json_str.count('{') + 1:
-                                logger_to_use.warning("Attempting to fix a potential extra trailing curly brace in JSON response.")
-                                cleaned_json_str = cleaned_json_str[:-1]
-                        
-                        translated_data = json.loads(cleaned_json_str)
-                        if 'translated_segments' not in translated_data or not isinstance(translated_data['translated_segments'], list):
-                            logger_to_use.warning(f"  Warning: 'translated_segments' array not found/invalid in response for batch {batch_idx+1}. Raw: {cleaned_json_str[:200] if cleaned_json_str else 'EMPTY'}... Using originals.")
-                            for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_BAD_JSON_STRUCTURE] {seg['text_en']}"
-                            continue
-                        translated_batch_segments_from_response = translated_data['translated_segments']
-                        if len(translated_batch_segments_from_response) != len(actual_batch_segments):
-                            logger_to_use.warning(f"Mismatch in translated segments for batch {batch_idx+1} (expected {len(actual_batch_segments)}, got {len(translated_batch_segments_from_response)}). Using originals for this batch.")
-                            for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_SEG_COUNT_MISMATCH] {seg['text_en']}"
-                            continue
-                        
-                        for i, translated_seg_item in enumerate(translated_batch_segments_from_response):
-                            original_complex_id_from_actual_batch = actual_batch_segments[i]["id"]
-                            text_en_from_actual_batch = actual_batch_segments[i]["text_en"]
-                            map_key = _normalize_timestamp_id(original_complex_id_from_actual_batch)
-
-                            if USE_SIMPLIFIED_IDS_EXPERIMENTAL:
-                                expected_simple_id = f"seg_{i}"
-                                model_returned_simple_id = translated_seg_item.get("id")
-                                if not model_returned_simple_id:
-                                    logger_to_use.warning(f"ID missing in translated segment. Batch {batch_idx+1}. Expected simple ID '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}'). Skipping.")
-                                    translations_map[map_key] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {text_en_from_actual_batch}"
-                                    continue
-                                if model_returned_simple_id != expected_simple_id:
-                                    logger_to_use.warning(f"Simple ID mismatch from model. Batch {batch_idx+1}.\n     Expected: '{expected_simple_id}' (for original: '{original_complex_id_from_actual_batch}')\n     Model Returned: '{model_returned_simple_id}'. Skipping.")
-                                    translations_map[map_key] = f"[NO_TRANSLATION_SIMPLE_ID_MISMATCH] {text_en_from_actual_batch}"
-                                    continue
-                            else: 
-                                translated_id_from_model = translated_seg_item.get("id")
-                                if not translated_id_from_model:
-                                    logger_to_use.warning(f"ID missing in translated segment for original ID '{original_complex_id_from_actual_batch}' in batch {batch_idx+1}. Skipping.")
-                                    translations_map[map_key] = f"[NO_TRANSLATION_ID_MISSING_IN_RESPONSE] {text_en_from_actual_batch}"
-                                    continue
-                                normalized_translated_id = _normalize_timestamp_id(translated_id_from_model)
-                                if map_key != normalized_translated_id: 
-                                    logger_to_use.warning(f"ID mismatch after attempting to normalize model response. Batch {batch_idx+1}.\n     Original (Normalized): '{map_key}'\n     Model Output Raw : '{translated_id_from_model}'\n     Model OutputNormd: '{normalized_translated_id}'. Skipping segment.")
-                                    translations_map[map_key] = f"[NO_TRANSLATION_ID_MISMATCH_NORM_FAILED_OR_VALUE_DIFF] {text_en_from_actual_batch}"
-                                    continue
-                            
-                            if output_text_field_key not in translated_seg_item:
-                                id_for_error_msg = f"seg_{i}" if USE_SIMPLIFIED_IDS_EXPERIMENTAL else original_complex_id_from_actual_batch
-                                logger_to_use.warning(f"Expected field '{output_text_field_key}' not found for ID '{id_for_error_msg}' in batch {batch_idx+1}. Using original.")
-                                translations_map[map_key] = f"[NO_TRANSLATION_MISSING_TEXT_FIELD] {text_en_from_actual_batch}"
-                                continue
-                            translations_map[map_key] = translated_seg_item[output_text_field_key]
-                        logger_to_use.info(f"Batch {batch_idx + 1} translated successfully.")
-                    except json.JSONDecodeError as e_json:
-                        logger_to_use.warning(f"Error decoding JSON for batch {batch_idx+1}: {e_json}. Raw response was: {cleaned_json_str[:500] if cleaned_json_str else 'EMPTY'}", exc_info=True)
-                        for seg in actual_batch_segments: translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_JSON_DECODE_ERROR] {seg['text_en']}"
-                    except Exception as e:
-                        logger_to_use.error(f"Error during translation for batch {batch_idx+1}: {e}", exc_info=True)
-                        for seg in actual_batch_segments:
-                            translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_GENERAL_ERROR] {seg['text_en']}"
-                except Exception as e:
-                    logger_to_use.error(f"Error during translation for batch {batch_idx+1}: {e}", exc_info=True)
-                    for seg in actual_batch_segments:
-                        translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_GENERAL_ERROR] {seg['text_en']}"
-                
-                if batch_idx < len(all_batches) - 1:
-                    logger_to_use.debug(f"Waiting for {config.SECONDS_BETWEEN_BATCHES}s before next batch...")
-                    time.sleep(config.SECONDS_BETWEEN_BATCHES)
-
-            final_translated_json_objects = []
-            for llm_id_key in llm_processing_ids_ordered:
-                original_text_en_for_id = "[TEXT_NOT_FOUND_IN_ORIGINAL_INPUT]"
-                for s_item in llm_input_segments:
-                    if s_item["id"] == llm_id_key:
-                        original_text_en_for_id = s_item["text_en"]
-                        break
-                
-                normalized_key_to_lookup = _normalize_timestamp_id(llm_id_key)
-
-                translated_string = translations_map.get(
-                    normalized_key_to_lookup, 
-                    f"[TRANSLATION_NOT_FOUND_FOR_ID:{llm_id_key}] [NORMALIZED_AS:{normalized_key_to_lookup}] {original_text_en_for_id}"
-                )
-                
-                output_obj = {
-                    "llm_processing_id": llm_id_key, 
-                    "translated_text": translated_string,
-                    "llm_info": { 
-                        "model_used": config.LLM_MODEL_GEMINI if config.LLM_PROVIDER == "gemini" else "unknown",
-                        "target_lang": target_lang
-                    },
-                    "source_data": source_data_map.get(llm_id_key)
-                }
-                final_translated_json_objects.append(output_obj)
-            
-            if len(final_translated_json_objects) != len(llm_input_segments):
-                 logger_to_use.critical(f"Final translated object count ({len(final_translated_json_objects)}) MISMATCHES original segment count ({len(llm_input_segments)}).")
-            
-            logger_to_use.debug(f"--- Gemini JSON translation processing complete. ---")
-            return final_translated_json_objects
+            self.logger.debug(f"Successfully initialized Gemini model: {config.LLM_MODEL_GEMINI} (JSON mode, temp=0.0).")
+            return model
         except Exception as e:
-            logger_to_use.critical(f"A critical error occurred during the Gemini translation process setup: {e}", exc_info=True)
-            for llm_item in llm_input_segments:
-                 translations_map[_normalize_timestamp_id(llm_item["id"])] = f"[NO_TRANSLATION_CRITICAL_ERROR] {llm_item['text_en']}"
+            self.logger.error(f"Failed to initialize Gemini model: {e}", exc_info=True)
+            return None
+
+    def translate_segments(self, pre_translate_json_list, source_lang_code, target_lang="zh-CN", video_specific_output_path=None):
+        """
+        The core method to orchestrate the translation process for a list of rich subtitle segments.
+        It preserves all source metadata.
+
+        Args:
+            pre_translate_json_list (list): A list of rich JSON objects, each containing 'llm_processing_id', 
+                                            'text_to_translate', and 'source_data'.
+            source_lang_code (str): The source language code (e.g., 'en').
+            target_lang (str): The target language code (e.g., 'zh-CN').
+            video_specific_output_path (str, optional): Path to a directory for logging raw responses. Defaults to None.
+
+        Returns:
+            list: A list of rich JSON objects with translated text, preserving all original source data.
+        """
+        if not self.model:
+            self.logger.error("Gemini model not initialized. Skipping translation.")
+            return self._create_skipped_results(pre_translate_json_list, "MODEL_NOT_INITIALIZED")
+
+        if not pre_translate_json_list:
+            self.logger.info("No segments to translate.")
+            return []
+
+        # Prepare segments and source data map
+        llm_input_segments, source_data_map, llm_processing_ids_ordered = self._prepare_input_data(pre_translate_json_list)
         
-            logger_to_use.debug(f"--- Gemini JSON translation processing complete. ---")
-            return []
-    else:
-        logger_to_use.error(f"Unsupported LLM_PROVIDER: {config.LLM_PROVIDER}")
-        # Return a list of dicts with original text and error message
-        simulated_results = []
-        if raw_llm_responses_log_file:
-            try:
-                with open(raw_llm_responses_log_file, 'a', encoding='utf-8') as f_raw:
-                    error_info = {"status": "SIMULATED_TRANSLATION", "error_message": "Simulated translation used due to unsupported/misconfigured LLM_PROVIDER."}
-                    f_raw.write(json.dumps(error_info) + '\n')
-            except Exception as e_log_sim:
-                logger_to_use.warning(f"Could not write simulation info to log file: {e_log_sim}", exc_info=True)
+        raw_llm_responses_log_file = self._setup_raw_response_logging(video_specific_output_path, target_lang)
 
-        for llm_item in llm_input_segments:
-            translated_text = f"[译] {llm_item['text_en']}" 
-            simulated_results.append({
-                "llm_processing_id": llm_item["id"],
-                "translated_text": translated_text,
-                "llm_info": {"simulation": True, "target_lang": target_lang},
-                "source_data": source_data_map.get(llm_item["id"])
-            })
-        logger_to_use.info("--- Simulated translation complete ---")
-        return simulated_results 
+        output_text_field_key = f"text_{target_lang.lower().replace('-', '_')}"
+        USE_SIMPLIFIED_IDS_EXPERIMENTAL = True # Keep this as a configurable flag
 
-class Translator:
-    def __init__(self, model_name=None, proxy=None):
-        self.provider = config.LLM_PROVIDER
-        self.proxy = proxy
-        self.logger = logging.getLogger(__name__)
-
-        if self.provider == "gemini":
-            self.model_name = model_name or config.LLM_MODEL_GEMINI
-            api_key = os.getenv("GEMINI_API_KEY")
-            if not api_key:
-                raise ValueError("GEMINI_API_KEY not found in environment variables.")
-            genai.configure(api_key=api_key)
-            generation_config = genai.types.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.0
-            )
-            self.client = genai.GenerativeModel(
-                self.model_name,
-                generation_config=generation_config
-            )
-            self.logger.info(f"Gemini Translator initialized with model: {self.model_name}")
-        else:
-            raise ValueError(f"Unsupported LLM provider: {self.provider}")
-
-    def _construct_prompt(self, segments_batch, target_lang):
-        output_key = f"text_{target_lang.lower().replace('-', '_')}"
-        instructions = (
-            f"Objective: Translate the 'text' field of each segment object to {target_lang}. "
-            f"Output Format: A JSON object with a single key 'translated_segments'. Its value must be an array of objects. "
-            f"Each object must retain the original 'id' and include the translated text in a new field named '{output_key}'. "
-            f"CRITICAL: The 'id' MUST be returned EXACTLY as provided. The number of output objects must exactly match the number of input segments."
+        # 1. BATCHING: Use the batching module
+        self.logger.debug(f"Target prompt tokens per batch: {config.TARGET_PROMPT_TOKENS_PER_BATCH}, Max segments per batch: {config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH}")
+        all_batches = create_batches_by_char_limit(
+            llm_input_segments, source_lang_code, target_lang, 
+            output_text_field_key, USE_SIMPLIFIED_IDS_EXPERIMENTAL, self.logger
         )
-        prompt_payload = {
-            "target_language": target_lang,
-            "instructions": instructions,
-            "segments": segments_batch
-        }
-        return json.dumps(prompt_payload, indent=2, ensure_ascii=False)
 
-    def translate_text_batches(self, segments, batch_size=config.MAX_SEGMENTS_PER_GEMINI_JSON_BATCH, target_lang="zh-CN"):
-        if not segments:
-            return []
+        translations_map = {}
+        for batch_idx, actual_batch_segments in enumerate(all_batches):
+            if not actual_batch_segments:
+                continue
+            self.logger.info(f"Translating batch {batch_idx + 1}/{len(all_batches)}...")
 
-        all_translated_texts = []
-        original_texts_map = {str(i): seg['text'] for i, seg in enumerate(segments)}
+            segments_for_payload = self._prepare_batch_payload(actual_batch_segments, USE_SIMPLIFIED_IDS_EXPERIMENTAL)
 
-        for i in range(0, len(segments), batch_size):
-            batch_segments_raw = segments[i:i + batch_size]
+            # 2. PROMPT CONSTRUCTION: Use the prompt builder module
+            prompt_to_send = construct_prompt_for_batch(
+                segments_for_payload, source_lang_code, target_lang, 
+                output_text_field_key, USE_SIMPLIFIED_IDS_EXPERIMENTAL
+            )
+
+            # 3. API CALL
+            response_text = self._call_gemini_api(prompt_to_send, raw_llm_responses_log_file, batch_idx + 1)
+
+            # 4. RESPONSE PARSING & VALIDATION: Use the response parser module
+            if response_text:
+                batch_translations = parse_and_validate_response(
+                    response_text, actual_batch_segments, output_text_field_key,
+                    batch_idx, USE_SIMPLIFIED_IDS_EXPERIMENTAL, self.logger
+                )
+                translations_map.update(batch_translations)
+            else:
+                self.logger.warning(f"Gemini response for batch {batch_idx+1} was empty. Using originals.")
+                for seg in actual_batch_segments:
+                    translations_map[_normalize_timestamp_id(seg["id"])] = f"[NO_TRANSLATION_EMPTY_RESPONSE] {seg['text_en']}"
+        
+        # 5. FINAL ASSEMBLY
+        return self._assemble_final_results(llm_processing_ids_ordered, translations_map, source_data_map)
+
+    def _create_skipped_results(self, pre_translate_json_list, reason):
+        """Creates a list of results indicating that translation was skipped."""
+        skipped_results = []
+        for item in pre_translate_json_list:
+             llm_id = item.get("llm_processing_id")
+             text = item.get("text_to_translate")
+             source_data = item.get("source_data")
+             skipped_results.append({
+                "llm_processing_id": llm_id,
+                "translated_text": f"[SKIPPED_{reason}] {text}",
+                "llm_info": {"error": f"Translation skipped: {reason}"},
+                "source_data": source_data
+             })
+        return skipped_results
+
+    def _prepare_input_data(self, pre_translate_json_list):
+        """Converts the input list into formats needed for processing."""
+        llm_input_segments = []
+        source_data_map = {}
+        llm_processing_ids_ordered = []
+        for item in pre_translate_json_list:
+            llm_id = item.get("llm_processing_id")
+            text = item.get("text_to_translate")
+            source_data = item.get("source_data")
+            if not llm_id or text is None:
+                self.logger.warning(f"Skipping item due to missing 'llm_processing_id' or 'text_to_translate': {item.get('segment_guid', 'Unknown GUID')}")
+                continue
+            llm_input_segments.append({"id": llm_id, "text_en": text})
+            source_data_map[llm_id] = source_data
+            llm_processing_ids_ordered.append(llm_id)
+        return llm_input_segments, source_data_map, llm_processing_ids_ordered
+
+    def _setup_raw_response_logging(self, video_specific_output_path, target_lang):
+        """Sets up the log file for raw LLM responses."""
+        if not video_specific_output_path:
+            return None
+        try:
+            log_filename = f"llm_raw_responses_{target_lang.lower().replace('-', '_')}.jsonl"
+            raw_llm_responses_log_file = os.path.join(video_specific_output_path, log_filename)
+            os.makedirs(video_specific_output_path, exist_ok=True)
+            self.logger.debug(f"Raw LLM API responses will be logged to: {raw_llm_responses_log_file}")
+            return raw_llm_responses_log_file
+        except Exception as e:
+            self.logger.error(f"Failed to set up raw response logging: {e}", exc_info=True)
+            return None
+
+    def _prepare_batch_payload(self, actual_batch_segments, use_simplified_ids):
+        """Prepares the list of segments to be included in the prompt payload."""
+        if not use_simplified_ids:
+            return actual_batch_segments
+        
+        segments_for_payload = []
+        for i, seg_data in enumerate(actual_batch_segments):
+            segments_for_payload.append({
+                "id": f"seg_{i}",
+                "text_en": seg_data["text_en"]
+            })
+        return segments_for_payload
+
+    def _call_gemini_api(self, prompt, log_file, batch_num):
+        """Sends the prompt to the Gemini API and logs the raw response."""
+        try:
+            response = self.model.generate_content(prompt)
+            raw_text = response.text if hasattr(response, 'text') and response.text else None
             
-            # Add a simple integer ID for re-mapping
-            batch_for_prompt = [{"id": str(i + j), "text": seg['text']} for j, seg in enumerate(batch_segments_raw)]
-
-            self.logger.info(f"Translating batch {i//batch_size + 1}/{-(-len(segments)//batch_size)}...")
+            if log_file:
+                try:
+                    with open(log_file, 'a', encoding='utf-8') as f_raw:
+                        if raw_text:
+                            f_raw.write(raw_text + '\n')
+                        else:
+                            placeholder = {"batch_index": batch_num, "status": "EMPTY_RESPONSE_TEXT", "has_parts": bool(response.parts if hasattr(response, 'parts') else False)}
+                            f_raw.write(json.dumps(placeholder) + '\n')
+                except Exception as e_log:
+                    self.logger.warning(f"Could not write raw LLM response for batch {batch_num} to log file: {e_log}", exc_info=True)
             
-            prompt = self._construct_prompt(batch_for_prompt, target_lang)
+            if not response.parts:
+                self.logger.warning(f"Gemini response for batch {batch_num} has no parts.")
+                return None
             
-            try:
-                response = self.client.generate_content(prompt)
-                response_text = response.text
-                
-                translated_data = json.loads(response_text)
-                translated_segments = translated_data.get('translated_segments', [])
+            return raw_text
+        except Exception as e:
+            self.logger.error(f"Error calling Gemini API for batch {batch_num}: {e}", exc_info=True)
+            return None
 
-                batch_translations = {}
-                output_key = f"text_{target_lang.lower().replace('-', '_')}"
-                for item in translated_segments:
-                    batch_translations[item['id']] = item.get(output_key, "")
+    def _assemble_final_results(self, ordered_ids, translations_map, source_data_map):
+        """Assembles the final list of translated segments in the original order."""
+        final_results = []
+        for llm_id in ordered_ids:
+            normalized_id = _normalize_timestamp_id(llm_id)
+            translated_text = translations_map.get(normalized_id, f"[TRANSLATION_NOT_FOUND] original text placeholder")
+            
+            # Find original text in case of placeholder, a bit inefficient but robust
+            if "original text placeholder" in translated_text:
+                 original_text = next((sd['text_en'] for sd_id, sd in source_data_map.items() if _normalize_timestamp_id(sd_id) == normalized_id), "")
+                 translated_text = translated_text.replace("original text placeholder", original_text)
 
-                # Re-order based on original batch order
-                for seg_info in batch_for_prompt:
-                    seg_id = seg_info['id']
-                    translated_text = batch_translations.get(seg_id)
-                    if translated_text:
-                        all_translated_texts.append(translated_text)
-                    else:
-                        self.logger.warning(f"Translation missing for segment id {seg_id}. Using original.")
-                        all_translated_texts.append(original_texts_map[seg_id])
+            final_results.append({
+                "llm_processing_id": llm_id,
+                "translated_text": translated_text,
+                "llm_info": {"model": config.LLM_MODEL_GEMINI},
+                "source_data": source_data_map.get(llm_id)
+            })
+        return final_results
 
-            except Exception as e:
-                self.logger.error(f"Error translating batch: {e}", exc_info=True)
-                # On error, use original text for the entire batch
-                all_translated_texts.extend([seg['text'] for seg in batch_segments_raw])
-
-        return all_translated_texts
-
-    def translate_text(self, texts, target_lang="zh-CN"):
-        # This can be deprecated or updated to use the batched method
-        segments_for_translation = [{"text": text} for text in texts]
-        return self.translate_text_batches(segments_for_translation, target_lang=target_lang)
+# Optional: Keep a standalone function for backward compatibility or simple use cases
+def translate_text_segments(pre_translate_json_list,
+                            source_lang_code, 
+                            target_lang="zh-CN",
+                            video_specific_output_path=None,
+                            logger=None):
+    """
+    High-level function to translate a list of processed transcript segments.
+    Instantiates and uses the GeminiTranslator class.
+    """
+    translator = Translator(logger=logger)
+    return translator.translate_segments(
+        pre_translate_json_list,
+        source_lang_code,
+        target_lang,
+        video_specific_output_path
+    )

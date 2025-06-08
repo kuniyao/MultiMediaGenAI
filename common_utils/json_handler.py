@@ -14,13 +14,28 @@ def create_pre_translate_json_objects(processed_segments, video_id, original_lan
         return output_json_objects
 
     for i, segment in enumerate(processed_segments):
-        if not isinstance(segment, dict) or 'start' not in segment or 'duration' not in segment or 'text' not in segment:
-            logger_to_use.warning(f"Segment {i} is not a valid dict or missing keys: {segment}. Skipping.")
+        if not isinstance(segment, dict) or 'start' not in segment or 'text' not in segment:
+            logger_to_use.warning(f"Segment {i} is not a valid dict or missing 'start'/'text': {segment}. Skipping.")
             continue
 
         start_seconds = segment['start']
-        duration_seconds = segment['duration']
         text_to_translate = segment['text']
+        duration_seconds = 0 # Default value
+
+        if 'duration' in segment:
+            # Use duration directly if it exists (e.g., from YouTube API)
+            duration_seconds = segment['duration']
+        elif 'end' in segment:
+            # Calculate duration if 'end' exists (e.g., from local SRT file)
+            duration_seconds = segment['end'] - start_seconds
+        else:
+            # If neither duration nor end is available, we cannot proceed with this segment.
+            logger_to_use.warning(f"Segment {i} is missing a 'duration' or 'end' key to calculate timing: {segment}. Skipping.")
+            continue
+        
+        if duration_seconds < 0:
+            logger_to_use.warning(f"Segment {i} has a negative duration ({duration_seconds:.3f}s). Skipping. Data: {segment}")
+            continue
 
         # Create the ID that will be used for LLM processing (matches existing format)
         llm_processing_id = f"{format_time(start_seconds)} --> {format_time(start_seconds + duration_seconds)}"
@@ -37,8 +52,10 @@ def create_pre_translate_json_objects(processed_segments, video_id, original_lan
                 "original_lang": original_lang,
                 "source_type": source_type, # e.g., "manual", "generated"
                 "start_seconds": start_seconds,
-                "duration_seconds": duration_seconds
-                # Optionally, could also include the original segment['text'] here if different from cleaned text_to_translate
+                "duration_seconds": duration_seconds,
+                "start": segment['start'],
+                "end": segment.get('end', start_seconds + duration_seconds),
+                "text": segment['text']
             }
         }
         output_json_objects.append(json_obj)
