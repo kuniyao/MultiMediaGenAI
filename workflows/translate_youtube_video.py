@@ -25,7 +25,8 @@ from common_utils.log_config import setup_task_logger
 from format_converters import (
     transcript_to_markdown, 
     segments_to_srt_string,
-    reconstruct_translated_markdown
+    reconstruct_translated_markdown,
+    generate_post_processed_srt
 )
 from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, fetch_and_prepare_transcript
 from llm_utils.translator import execute_translation
@@ -61,16 +62,6 @@ def _parse_args():
 
 def _setup_environment_and_logging(args):
     """Sets up the environment, including directories, logging, and initial variables."""
-    # Load .env file from project root
-    script_path = os.path.abspath(__file__)
-    script_dir = os.path.dirname(script_path)
-    project_root_dir = os.path.dirname(script_dir)
-    dotenv_path = os.path.join(project_root_dir, '.env')
-    if os.path.exists(dotenv_path):
-        load_dotenv(dotenv_path=dotenv_path)
-    else:
-        load_dotenv() # Fallback to default search paths
-
     # --- Video and Path Setup ---
     video_id = get_video_id(args.video_url_or_id)
     video_title = get_youtube_video_title(args.video_url_or_id, logger=None) # Initial fetch without logger
@@ -160,24 +151,9 @@ def _generate_output_files(translated_json_objects, target_lang, lang_code, sour
     )
     save_to_file(translated_md_content, translated_md_filename, logger=logger)
 
-    # Generate translated SRT
-    logger.info("Preparing segments for SRT generation...")
-    segments_for_srt = []
-    for item in translated_json_objects:
-        try:
-            start_time = item['source_data']['start_seconds']
-            end_time = start_time + item['source_data']['duration_seconds']
-            segments_for_srt.append({
-                'start': start_time,
-                'end': end_time,
-                'translation': item['translated_text']
-            })
-        except KeyError as e:
-            logger.error(f"Skipping SRT segment due to missing key {e} in item: {item}")
-            continue
-
+    # Generate translated SRT using the new, centralized post-processing function
+    translated_srt_content = generate_post_processed_srt(translated_json_objects, logger)
     translated_srt_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{target_lang}.srt")
-    translated_srt_content = segments_to_srt_string(segments_for_srt)
     save_to_file(translated_srt_content, translated_srt_filename, logger=logger)
 
 def _log_summary(video_output_path, file_basename_prefix, lang_code, target_lang, logger):

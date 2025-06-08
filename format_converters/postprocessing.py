@@ -1,4 +1,5 @@
 import re
+from .srt_handler import segments_to_srt_string
 
 def post_process_translated_segments(segments, max_chars_per_line=35, max_lines=2):
     """
@@ -148,3 +149,41 @@ def _wrap_text(text, max_chars_per_line, max_lines):
 
 
     return "\n".join(lines).strip() 
+
+def generate_post_processed_srt(translated_json_objects, logger):
+    """
+    Takes translated JSON objects, post-processes them for optimal SRT formatting,
+    and returns the final SRT content as a string.
+    This is the centralized function for creating high-quality SRT files.
+
+    Args:
+        translated_json_objects (list): The list of rich JSON objects from the translator.
+        logger: A logger instance.
+
+    Returns:
+        str: The fully processed SRT content.
+    """
+    # 1. Prepare segments for post-processing
+    segments_for_processing = []
+    for item in translated_json_objects:
+        try:
+            # Reconstruct the object that post_process_translated_segments expects
+            segment_data = item['source_data']
+            segment_data['translation'] = item['translated_text']
+            # Ensure start and end times are available
+            if 'end' not in segment_data:
+                segment_data['end'] = segment_data['start'] + segment_data.get('duration_seconds', 0)
+            segments_for_processing.append(segment_data)
+        except (KeyError, TypeError) as e:
+            logger.error(f"Skipping segment in SRT generation due to data error: {e}. Item: {item}")
+            continue
+
+    # 2. Run the main post-processing logic
+    logger.info("Post-processing translated segments for optimal formatting...")
+    final_segments = post_process_translated_segments(segments_for_processing)
+
+    # 3. Generate the final SRT string
+    logger.info("Generating SRT content from final segments...")
+    translated_srt_content = segments_to_srt_string(final_segments)
+    
+    return translated_srt_content 

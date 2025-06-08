@@ -20,12 +20,13 @@ from .markdown_handler import (
 )
 
 from .preprocessing import (
-    merge_consecutive_segments,
+    merge_segments_intelligently,
     load_and_merge_srt_segments
 )
 
 from .postprocessing import (
-    post_process_translated_segments
+    post_process_translated_segments,
+    generate_post_processed_srt
 )
 
 # Initializes the format_converters module 

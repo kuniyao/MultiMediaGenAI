@@ -4,6 +4,7 @@ import xml.etree.ElementTree as ET
 from pytubefix import YouTube
 from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript
 import config # Assuming config.py is in the PYTHONPATH or project root
+from format_converters.preprocessing import merge_segments_intelligently
 
 # Placeholder for YouTube data fetching logic
 
@@ -136,159 +137,16 @@ def get_youtube_video_title(video_url_or_id, logger=None):
             video_id_fallback = video_url_or_id.split("youtu.be/")[1].split("?")[0]
         return video_id_fallback
 
-def preprocess_and_merge_segments(raw_transcript_data, logger=None):
-    """
-    Merges raw transcript segments based on duration, length, and punctuation.
-    Also cleans up newlines within segments.
-    """
-    logger_to_use = logger if logger else logging.getLogger(__name__)
-    if not raw_transcript_data:
-        logger_to_use.info("preprocess_and_merge_segments: Received empty raw_transcript_data. Returning empty list.")
-        return []
-    logger_to_use.debug(f"preprocess_and_merge_segments: Starting with {len(raw_transcript_data)} raw entries.")
-
-    initial_cleaned_entries = []
-    for entry_obj in raw_transcript_data:
-        cleaned_text = entry_obj.text.replace('\n', ' ').strip()
-        if cleaned_text:
-            initial_cleaned_entries.append({
-                'text': cleaned_text,
-                'start': entry_obj.start,    
-                'duration': entry_obj.duration,
-                'original_text_length': len(cleaned_text)
-            })
-
-    if not initial_cleaned_entries:
-        return []
-    
-    def _is_actual_sentence_end_char(text_segment, char_index_in_segment, sentence_end_punctuations_config):
-        char_to_check = text_segment[char_index_in_segment]
-        if char_to_check == '.':
-            is_prev_digit = (char_index_in_segment > 0 and text_segment[char_index_in_segment - 1].isdigit())
-            is_next_digit = (char_index_in_segment < len(text_segment) - 1 and text_segment[char_index_in_segment + 1].isdigit())
-            if is_prev_digit and is_next_digit: return False 
-            if not is_prev_digit and is_next_digit: 
-                if not (char_index_in_segment > 0 and text_segment[char_index_in_segment - 1] == '.'): return False 
-            prev_char_is_alnum = (char_index_in_segment > 0 and text_segment[char_index_in_segment - 1].isalnum())
-            next_char_is_alnum = (char_index_in_segment < len(text_segment) - 1 and text_segment[char_index_in_segment + 1].isalnum())
-            if prev_char_is_alnum and next_char_is_alnum:
-                idx_after_alnum_dot_alnum = char_index_in_segment + 2 
-                if idx_after_alnum_dot_alnum < len(text_segment) -1:
-                    if text_segment[idx_after_alnum_dot_alnum] == ' ' and text_segment[idx_after_alnum_dot_alnum + 1].isupper(): return True 
-                    else: return False 
-                else: return False 
-            return True
-        elif char_to_check in sentence_end_punctuations_config: return True
-        return False
-
-    logger_to_use.debug(f"\n--- Starting Pre-segmentation and Merging Logic ---")
-    logger_to_use.debug(f"Pass 1: Initial cleaning complete. {len(initial_cleaned_entries)} entries.")
-
-    fine_grained_entries = []
-    for i, entry_dict in enumerate(initial_cleaned_entries):
-        text_to_process = entry_dict['text']
-        original_start_time = entry_dict['start']
-        original_duration = entry_dict['duration']
-        original_text_len = entry_dict['original_text_length']
-        if original_text_len == 0: continue
-        current_sub_segment_start_time = original_start_time
-        while text_to_process:
-            found_punc_at = -1
-            for punc_char_idx, char_in_text in enumerate(text_to_process):
-                if _is_actual_sentence_end_char(text_to_process, punc_char_idx, config.SENTENCE_END_PUNCTUATIONS):
-                    found_punc_at = punc_char_idx
-                    break
-            if found_punc_at != -1:
-                sub_segment_text = text_to_process[:found_punc_at + 1]
-                len_sub_segment = len(sub_segment_text)
-                estimated_duration = (len_sub_segment / original_text_len) * original_duration
-                fine_grained_entries.append({
-                    'text': sub_segment_text,
-                    'start': current_sub_segment_start_time,
-                    'duration': estimated_duration
-                })
-                current_sub_segment_start_time += estimated_duration
-                text_to_process = text_to_process[found_punc_at + 1:].lstrip()
-            else:
-                if text_to_process:
-                    remaining_len = len(text_to_process)
-                    estimated_duration = (remaining_len / original_text_len) * original_duration
-                    fine_grained_entries.append({
-                        'text': text_to_process,
-                        'start': current_sub_segment_start_time,
-                        'duration': estimated_duration 
-                    })
-                text_to_process = ""
-        
-    logger_to_use.debug(f"Pass 2: Pre-splitting complete. {len(fine_grained_entries)} fine-grained entries generated.")
-
-    logger_to_use.debug(f"\nPass 3: Merging fine-grained entries (Punctuation ONLY at end of accumulation)...")
-    logger_to_use.debug(f"Configured Sentence End Punctuations: {config.SENTENCE_END_PUNCTUATIONS}\n")
-
-    final_merged_segments = []
-    current_accumulated_fine_grained_entries = [] 
-    for i, fg_entry_dict in enumerate(fine_grained_entries):
-        current_accumulated_fine_grained_entries.append(fg_entry_dict)
-        current_segment_text = " ".join(e['text'] for e in current_accumulated_fine_grained_entries)
-        if current_segment_text and _is_actual_sentence_end_char(current_segment_text, len(current_segment_text)-1, config.SENTENCE_END_PUNCTUATIONS):
-            segment_start_time = current_accumulated_fine_grained_entries[0]['start']
-            segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
-            segment_duration = segment_end_time - segment_start_time
-            
-            # Fix for negative duration issue caused by ASR timestamp errors
-            if segment_duration < 0:
-                logger_to_use.warning(f"Negative duration detected ({segment_duration:.3f}s) for segment. Correcting to 0. Text: '{current_segment_text}'")
-                segment_duration = 0
-
-            final_merged_segments.append({
-                'text': current_segment_text,
-                'start': segment_start_time,
-                'duration': segment_duration
-            })
-            current_accumulated_fine_grained_entries = [] 
-        else:
-            pass
-
-    if current_accumulated_fine_grained_entries:
-        logger_to_use.debug(f"\n  Pass 3 - Finalizing remaining accumulated fine-grained entries as the last segment.")
-        segment_text = " ".join(e['text'] for e in current_accumulated_fine_grained_entries)
-        segment_start_time = current_accumulated_fine_grained_entries[0]['start']
-        segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
-        segment_duration = segment_end_time - segment_start_time
-        
-        # Fix for negative duration issue caused by ASR timestamp errors
-        if segment_duration < 0:
-            logger_to_use.warning(f"Negative duration detected ({segment_duration:.3f}s) for final segment. Correcting to 0. Text: '{segment_text}'")
-            segment_duration = 0
-
-        final_merged_segments.append({
-            'text': segment_text,
-            'start': segment_start_time,
-            'duration': segment_duration
-        })
-    
-    logger_to_use.debug(f"--- Pre-segmentation and Merging Logic Finished. Total segments: {len(final_merged_segments)} ---")
-    return final_merged_segments
-
 def get_video_id(url_or_id):
     """
-    Extracts the video ID from a YouTube URL or returns the input if it's already an ID.
+    Extracts the video ID from a YouTube URL or returns the ID if it's already an ID.
     """
-    if not isinstance(url_or_id, str):
-        # Return as is if it's not a string, though this is unexpected.
-        return url_or_id
-        
-    try:
-        if "youtube.com/watch?v=" in url_or_id:
-            return url_or_id.split("watch?v=")[1].split("&")[0]
-        elif "youtu.be/" in url_or_id:
-            return url_or_id.split("youtu.be/")[1].split("?")[0]
-        # Fallback for any other case, assuming it's already a valid ID
-        return url_or_id
-    except Exception as e:
-        # If any error occurs during parsing, it's safer to return the original input
-        logging.getLogger(__name__).warning(f"Could not parse video ID from '{url_or_id}', returning as is. Error: {e}")
-        return url_or_id
+    if "youtube.com/watch?v=" in url_or_id:
+        return url_or_id.split("watch?v=")[1].split("&")[0]
+    elif "youtu.be/" in url_or_id:
+        return url_or_id.split("youtu.be/")[1].split("?")[0]
+    # Assume it's already an ID if no URL format matches
+    return url_or_id
 
 def fetch_and_prepare_transcript(video_id, logger=None):
     """
@@ -317,7 +175,9 @@ def fetch_and_prepare_transcript(video_id, logger=None):
         return None, None, None
     logger_to_use.info(f"Successfully fetched {source_type} transcript in '{lang_code}'.")
     
-    merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data, logger=logger_to_use)
+    # Pass the raw transcript data (list of objects) directly to the merger.
+    # The merger will be updated to handle this object format.
+    merged_transcript_data = merge_segments_intelligently(raw_transcript_data, logger=logger_to_use)
 
     if not merged_transcript_data:
         logger_to_use.error("Transcript data is empty after preprocessing and merging. Process cannot continue.")

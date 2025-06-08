@@ -13,7 +13,7 @@ from common_utils.file_helpers import sanitize_filename, save_to_file
 from common_utils.log_config import setup_task_logger
 from format_converters import (
     load_and_merge_srt_segments,
-    post_process_translated_segments,
+    generate_post_processed_srt,
     segments_to_srt_string
 )
 from llm_utils.translator import execute_translation
@@ -60,25 +60,14 @@ def _create_pre_translation_json(segments, file_stem, logger):
     return pre_translate_json_objects
 
 def _generate_final_srt(translated_json_objects, output_dir, file_stem, target_lang, logger):
-    """Post-processes translated segments and writes the final SRT file."""
-    # The translator returns rich objects. We must prepare them for the legacy post-processing function.
-    final_segments_for_processing = []
-    for item in translated_json_objects:
-        # Reconstruct the object that post_process_translated_segments expects
-        segment_data = item['source_data']
-        segment_data['translation'] = item['translated_text']
-        final_segments_for_processing.append(segment_data)
-
-    logger.info("Post-processing translated segments for optimal formatting...")
-    final_segments = post_process_translated_segments(final_segments_for_processing)
-
-    logger.info("Generating SRT content from final segments...")
-    translated_srt_content = segments_to_srt_string(final_segments)
+    """Generates and saves the final, post-processed SRT file."""
+    # The new centralized function handles all the complex logic.
+    translated_srt_content = generate_post_processed_srt(translated_json_objects, logger)
 
     translated_srt_path = output_dir / f"{file_stem}_{target_lang}_translated.srt"
     
     logger.info(f"Saving translated SRT file to: {translated_srt_path}")
-    save_to_file(translated_srt_content, translated_srt_path)
+    save_to_file(translated_srt_content, translated_srt_path, logger=logger)
 
     logger.info(f"Translated SRT file saved to: {translated_srt_path}")
 
