@@ -5,7 +5,7 @@ import logging
 import google.generativeai as genai
 import json
 import config
-from format_converters.core import _normalize_timestamp_id
+from format_converters import _normalize_timestamp_id
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -227,20 +227,53 @@ class Translator:
             })
         return final_results
 
-# Optional: Keep a standalone function for backward compatibility or simple use cases
-def translate_text_segments(pre_translate_json_list,
-                            source_lang_code, 
-                            target_lang="zh-CN",
-                            video_specific_output_path=None,
-                            logger=None):
+def execute_translation(pre_translate_json_list, source_lang_code, target_lang, video_specific_output_path=None, logger=None):
     """
-    High-level function to translate a list of processed transcript segments.
-    Instantiates and uses the GeminiTranslator class.
+    A robust, high-level function to orchestrate the translation process.
+
+    This function initializes the translator, runs the translation, performs
+    an integrity check on the results, and returns the translated data.
+    It serves as a common, reusable entry point for all translation workflows.
+
+    Args:
+        pre_translate_json_list (list): The list of rich JSON objects to be translated.
+        source_lang_code (str): The source language code (e.g., 'en', 'auto').
+        target_lang (str): The target language for translation.
+        video_specific_output_path (str, optional): The path to save raw LLM responses.
+        logger (logging.Logger, optional): The logger to use for logging messages.
+
+    Returns:
+        list or None: A list of translated rich JSON objects, or None if translation fails
+                      or if the integrity check fails.
     """
-    translator = Translator(logger=logger)
-    return translator.translate_segments(
-        pre_translate_json_list,
-        source_lang_code,
-        target_lang,
-        video_specific_output_path
+    logger_to_use = logger if logger else logging.getLogger(__name__)
+    
+    logger_to_use.info("Instantiating unified translator...")
+    translator = Translator(logger=logger_to_use)
+
+    logger_to_use.info(f"Starting translation from '{source_lang_code}' to '{target_lang}'...")
+    translated_json_objects = translator.translate_segments(
+        pre_translate_json_list=pre_translate_json_list,
+        source_lang_code=source_lang_code,
+        target_lang=target_lang,
+        video_specific_output_path=video_specific_output_path
     )
+
+    if not translated_json_objects:
+        logger_to_use.error("Translation failed or returned no segments. Process cannot continue.")
+        return None
+        
+    logger_to_use.info("Translation processing complete.")
+
+    # Integrity check: Ensure the number of translated segments matches the input.
+    if len(translated_json_objects) != len(pre_translate_json_list):
+        logger_to_use.critical(
+            f"CRITICAL: Segment count mismatch! "
+            f"Input: {len(pre_translate_json_list)}, "
+            f"Output: {len(translated_json_objects)}. "
+            "Translation results will be discarded to prevent corruption."
+        )
+        return None
+    
+    logger_to_use.info("Segment count integrity check passed.")
+    return translated_json_objects

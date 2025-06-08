@@ -234,6 +234,12 @@ def preprocess_and_merge_segments(raw_transcript_data, logger=None):
             segment_start_time = current_accumulated_fine_grained_entries[0]['start']
             segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
             segment_duration = segment_end_time - segment_start_time
+            
+            # Fix for negative duration issue caused by ASR timestamp errors
+            if segment_duration < 0:
+                logger_to_use.warning(f"Negative duration detected ({segment_duration:.3f}s) for segment. Correcting to 0. Text: '{current_segment_text}'")
+                segment_duration = 0
+
             final_merged_segments.append({
                 'text': current_segment_text,
                 'start': segment_start_time,
@@ -249,6 +255,12 @@ def preprocess_and_merge_segments(raw_transcript_data, logger=None):
         segment_start_time = current_accumulated_fine_grained_entries[0]['start']
         segment_end_time = current_accumulated_fine_grained_entries[-1]['start'] + current_accumulated_fine_grained_entries[-1]['duration']
         segment_duration = segment_end_time - segment_start_time
+        
+        # Fix for negative duration issue caused by ASR timestamp errors
+        if segment_duration < 0:
+            logger_to_use.warning(f"Negative duration detected ({segment_duration:.3f}s) for final segment. Correcting to 0. Text: '{segment_text}'")
+            segment_duration = 0
+
         final_merged_segments.append({
             'text': segment_text,
             'start': segment_start_time,

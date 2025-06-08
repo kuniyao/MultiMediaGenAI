@@ -11,7 +11,15 @@
 
 ## 架构与工作流
 
-本项目的核心是 `llm_utils/Translator` 类，它是一个统一的翻译引擎。所有工作流（无论是处理YouTube字幕还是本地文件）都会先将自己的数据适配成一种标准的"富数据格式"，然后交由这个强大的翻译引擎处理。
+本项目的架构遵循"编排与执行分离"的原则。`workflows/` 目录下的脚本负责定义和编排特定任务（如"翻译一个YouTube视频"）的步骤，而具体的执行逻辑则由可复用的工具模块（如 `llm_utils`, `common_utils`）提供。
+
+所有工作流共享一个统一的翻译入口：`llm_utils.translator.execute_translation` 函数。该函数封装了与大语言模型交互的所有复杂性，包括批处理、构建提示、调用API、解析结果和执行数据完整性检查。
+
+工作流的核心流程如下：
+1. **数据准备**: 工作流脚本调用 `youtube_utils` 或 `format_converters` 来获取源数据。
+2. **格式适配**: 使用 `common_utils.json_handler` 将源数据转换为统一的"富数据格式"。
+3. **执行翻译**: 将适配后的数据交给 `execute_translation` 函数进行翻译。
+4. **生成输出**: 使用 `format_converters` 将翻译结果重构为最终的 `.srt` 或 `.md` 文件。
 
 ```mermaid
 graph TD;
@@ -26,15 +34,14 @@ graph TD;
     end
 
     subgraph C[核心翻译引擎]
-        C1["llm_utils.batching<br/>智能批处理"];
-        C2["llm_utils.prompt_builder<br/>构建提示词"];
-        C3["llm_utils.Translator<br/><b>调用LLM API</b>"];
-        C4["llm_utils.response_parser<br/>解析与验证响应"];
-        C1 --> C2 --> C3 --> C4;
+        C0["execute_translation<br/><b>统一翻译入口</b>"] --> C1["llm_utils.batching<br/>智能批处理"];
+        C1 --> C2["llm_utils.prompt_builder<br/>构建提示词"];
+        C2 --> C3["llm_utils.Translator<br/>调用LLM API"];
+        C3 --> C4["llm_utils.response_parser<br/>解析与验证响应"];
     end
 
-    A3 --> C1;
-    B3 --> C1;
+    A3 --> C0;
+    B3 --> C0;
     
     C4 --> D["format_converters<br/>后处理与生成<br/>(SRT, Markdown)"];
 ```
@@ -92,3 +99,14 @@ python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_la
 
 
 所有生成的文件，包括日志和翻译结果，将被保存在项目目录外的一个名为 `GlobalWorkflowOutputs` 的文件夹中，并以视频标题或文件名分类存放。
+
+## 已知问题与处理
+
+### YouTube 字幕中的负时长 (Negative Duration)
+
+- **问题现象**: 在处理某些YouTube视频时，日志中可能会出现关于"负时长" (`Negative duration detected`) 的警告。
+- **根本原因**: 这是由于 YouTube 的自动语音识别 (ASR) 系统在生成字幕时，可能产生微小的时间戳误差，导致某个字幕片段的计算出的结束时间早于其开始时间。这属于上游数据源的固有问题。
+- **处理策略**:
+  - **旧版行为**: 直接丢弃这些存在时间戳问题的字幕片段，导致翻译内容丢失。
+  - **当前修复**: 在 `youtube_utils/data_fetcher.py` 的 `preprocess_and_merge_segments` 函数中，我们不再丢弃这些片段。而是将它们的**时长修正为0**，并保留其文本内容。
+- **结果**: 这样可以确保即使源数据存在微瑕，也不会丢失任何需要翻译的文本内容，保证了翻译的完整性。虽然在生成的SRT文件中，这些片段会成为"零时长"字幕（一闪而过），但这远优于丢失整句内容。

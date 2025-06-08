@@ -1,6 +1,7 @@
 import json
 import logging
-from format_converters.core import _normalize_timestamp_id
+from format_converters import _normalize_timestamp_id
+import re
 
 def parse_and_validate_response(
     response_text,

@@ -1,6 +1,6 @@
 import json
 import logging
-from format_converters.core import format_time # Assuming this is accessible
+from format_converters import format_time # Assuming this is accessible
 
 def create_pre_translate_json_objects(processed_segments, video_id, original_lang, source_type, logger=None):
     """
