@@ -271,8 +271,57 @@ def preprocess_and_merge_segments(raw_transcript_data, logger=None):
     return final_merged_segments
 
 def get_video_id(url_or_id):
-    if "youtube.com/watch?v=" in url_or_id:
-        return url_or_id.split("watch?v=")[1].split("&")[0]
-    elif "youtu.be/" in url_or_id:
-        return url_or_id.split("youtu.be/")[1].split("?")[0]
-    return url_or_id 
+    """
+    Extracts the video ID from a YouTube URL or returns the input if it's already an ID.
+    """
+    if not isinstance(url_or_id, str):
+        # Return as is if it's not a string, though this is unexpected.
+        return url_or_id
+        
+    try:
+        if "youtube.com/watch?v=" in url_or_id:
+            return url_or_id.split("watch?v=")[1].split("&")[0]
+        elif "youtu.be/" in url_or_id:
+            return url_or_id.split("youtu.be/")[1].split("?")[0]
+        # Fallback for any other case, assuming it's already a valid ID
+        return url_or_id
+    except Exception as e:
+        # If any error occurs during parsing, it's safer to return the original input
+        logging.getLogger(__name__).warning(f"Could not parse video ID from '{url_or_id}', returning as is. Error: {e}")
+        return url_or_id
+
+def fetch_and_prepare_transcript(video_id, logger=None):
+    """
+    Fetches, processes, and merges the transcript for a YouTube video.
+
+    This is a high-level function that orchestrates the fetching of the
+    raw transcript and the subsequent preprocessing and merging of its segments.
+
+    Args:
+        video_id (str): The ID of the YouTube video.
+        logger: A logger instance for logging messages.
+
+    Returns:
+        A tuple containing:
+        - list: A list of merged transcript segments.
+        - str: The language code of the fetched transcript.
+        - str: The source type of the transcript ('manual' or 'generated').
+        Returns (None, None, None) if the process fails.
+    """
+    logger_to_use = logger if logger else logging.getLogger(__name__)
+
+    raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id, logger=logger_to_use)
+
+    if not raw_transcript_data:
+        logger_to_use.error("Could not retrieve transcript. Process cannot continue.")
+        return None, None, None
+    logger_to_use.info(f"Successfully fetched {source_type} transcript in '{lang_code}'.")
+    
+    merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data, logger=logger_to_use)
+
+    if not merged_transcript_data:
+        logger_to_use.error("Transcript data is empty after preprocessing and merging. Process cannot continue.")
+        return None, None, None
+    logger_to_use.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
+    
+    return merged_transcript_data, lang_code, source_type 

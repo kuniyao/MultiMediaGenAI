@@ -2,48 +2,30 @@ import logging
 from pathlib import Path
 from .time_utils import format_time, srt_time_to_seconds
 
-def write_srt_file(subtitle_segments, output_path: Path):
+def segments_to_srt_string(subtitle_segments):
     """
-    Writes a list of subtitle segments to an SRT file.
+    Converts a list of subtitle segments into a single SRT formatted string.
+    
+    The input segments should be a list of dictionaries, where each dictionary
+    has 'start', 'end', and 'translation' (or 'text') keys.
     """
-    with open(output_path, 'w', encoding='utf-8') as f:
-        for i, sub in enumerate(subtitle_segments):
+    srt_blocks = []
+    for i, sub in enumerate(subtitle_segments):
+        try:
             start_time = format_time(sub['start'])
             end_time = format_time(sub['end'])
-            # Use the 'translation' field for the text
+            # Use the 'translation' field first, fallback to 'text'
             text = sub.get('translation', sub.get('text', ''))
             
-            f.write(f"{i + 1}\n")
-            f.write(f"{start_time} --> {end_time}\n")
-            f.write(f"{text}\n\n")
-
-def reconstruct_translated_srt(translated_json_segments, logger=None):
-    """Reconstructs SRT from translated JSON objects containing original timestamps and translated texts."""
-    logger_to_use = logger if logger else logging.getLogger(__name__)
-    
-    srt_content = []
-    if not translated_json_segments:
-        logger_to_use.warning("No translated segments provided to reconstruct_translated_srt.")
-        return ""
-
-    for i, item in enumerate(translated_json_segments):
-        try:
-            translated_text = item['translated_text']
-            source_data = item['source_data']
-            start_seconds = source_data['start_seconds']
-            duration_seconds = source_data['duration_seconds']
-            
-            start_time_str = format_time(start_seconds)
-            end_time_str = format_time(start_seconds + duration_seconds)
-            
-            srt_content.append(f"{i+1}\n{start_time_str} --> {end_time_str}\n{translated_text}\n")
+            block = f"{i + 1}\n{start_time} --> {end_time}\n{text}"
+            srt_blocks.append(block)
         except KeyError as e:
-            logger_to_use.error(f"Missing key {e} in translated_json_segment item {i}: {item}. Skipping segment.", exc_info=True)
-            srt_content.append(f"{i+1}\nERROR --> ERROR\n[Segment data error: {e}]\n") # Add an error placeholder
-        except TypeError as e:
-            logger_to_use.error(f"Type error (likely None for source_data or time fields) in item {i}: {item}. Error: {e}. Skipping segment.", exc_info=True)
-            srt_content.append(f"{i+1}\nERROR --> ERROR\n[Segment data type error: {e}]\n")
-    return "\n".join(srt_content)
+            # Log or handle the error for the problematic segment
+            logging.error(f"Skipping segment due to missing key {e}: {sub}")
+            continue
+    
+    # Join all blocks with double newlines, and add a final newline for file standards
+    return "\n\n".join(srt_blocks) + "\n"
 
 def srt_to_segments(srt_file: Path):
     """Parses an SRT file and returns a list of subtitle segments."""

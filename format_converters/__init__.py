@@ -10,9 +10,8 @@ from .time_utils import (
 )
 
 from .srt_handler import (
-    reconstruct_translated_srt,
-    srt_to_segments,
-    write_srt_file
+    segments_to_srt_string,
+    srt_to_segments
 )
 
 from .markdown_handler import (
@@ -21,7 +20,8 @@ from .markdown_handler import (
 )
 
 from .preprocessing import (
-    merge_consecutive_segments
+    merge_consecutive_segments,
+    load_and_merge_srt_segments
 )
 
 from .postprocessing import (

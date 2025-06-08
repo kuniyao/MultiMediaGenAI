@@ -24,10 +24,10 @@ from common_utils.file_helpers import sanitize_filename, save_to_file
 from common_utils.log_config import setup_task_logger
 from format_converters import (
     transcript_to_markdown, 
-    reconstruct_translated_srt, 
+    segments_to_srt_string,
     reconstruct_translated_markdown
 )
-from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, get_youtube_transcript, preprocess_and_merge_segments
+from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, fetch_and_prepare_transcript
 from llm_utils.translator import execute_translation
 from common_utils.json_handler import create_pre_translate_json_objects, save_json_objects_to_jsonl, load_json_objects_from_jsonl
 
@@ -114,24 +114,6 @@ def _setup_environment_and_logging(args):
         "video_title": video_title
     }
 
-def _fetch_and_process_transcript(video_id, logger):
-    """Fetches and processes the YouTube transcript."""
-    raw_transcript_data, lang_code, source_type = get_youtube_transcript(video_id, logger=logger)
-
-    if not raw_transcript_data:
-        logger.error("Could not retrieve transcript. Process cannot continue.")
-        return None, None, None
-    logger.info(f"Successfully fetched {source_type} transcript in '{lang_code}'.")
-    
-    merged_transcript_data = preprocess_and_merge_segments(raw_transcript_data, logger=logger)
-
-    if not merged_transcript_data:
-        logger.error("Transcript data is empty after preprocessing and merging. Process cannot continue.")
-        return None, None, None
-    logger.info(f"Preprocessing complete. Merged into {len(merged_transcript_data)} segments.")
-    
-    return merged_transcript_data, lang_code, source_type
-
 def _create_pre_translation_artifacts(transcript_data, lang_code, source_type, video_id, video_output_path, file_basename_prefix, logger):
     """Creates and saves artifacts required before translation, like original markdown and pre-translation JSONL."""
     # Save original transcript as Markdown
@@ -179,11 +161,23 @@ def _generate_output_files(translated_json_objects, target_lang, lang_code, sour
     save_to_file(translated_md_content, translated_md_filename, logger=logger)
 
     # Generate translated SRT
+    logger.info("Preparing segments for SRT generation...")
+    segments_for_srt = []
+    for item in translated_json_objects:
+        try:
+            start_time = item['source_data']['start_seconds']
+            end_time = start_time + item['source_data']['duration_seconds']
+            segments_for_srt.append({
+                'start': start_time,
+                'end': end_time,
+                'translation': item['translated_text']
+            })
+        except KeyError as e:
+            logger.error(f"Skipping SRT segment due to missing key {e} in item: {item}")
+            continue
+
     translated_srt_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{target_lang}.srt")
-    translated_srt_content = reconstruct_translated_srt(
-        translated_json_objects,
-        logger=logger
-    )
+    translated_srt_content = segments_to_srt_string(segments_for_srt)
     save_to_file(translated_srt_content, translated_srt_filename, logger=logger)
 
 def _log_summary(video_output_path, file_basename_prefix, lang_code, target_lang, logger):
@@ -232,7 +226,7 @@ def main():
         task_logger.info(f"--- YouTube Translator workflow started for input: {args.video_url_or_id} ---")
         
         # 1. Fetch and process transcript
-        merged_transcript_data, lang_code, source_type = _fetch_and_process_transcript(
+        merged_transcript_data, lang_code, source_type = fetch_and_prepare_transcript(
             video_id=setup_results['video_id'],
             logger=task_logger
         )

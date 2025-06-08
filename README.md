@@ -5,9 +5,10 @@
 ## 核心功能
 
 - **YouTube 视频翻译**: 输入一个YouTube视频链接，自动获取官方字幕或自动生成的字幕，并将其翻译成指定语言。
-- **本地文件翻译**: 支持直接翻译本地的 `.srt` 字幕文件，同时保留原始时间轴信息。
-- **模块化与可扩展**: 项目采用高内聚、低耦合的模块化设计，方便未来扩展新的功能和工作流。
+- **本地文件翻译**: 支持直接翻译本地的 `.srt` 字幕文件。
+- **模块化与可扩展**: 项目遵循高内聚、低耦合的设计原则。核心功能（如日志记录、文件生成、数据获取与处理）都被封装在可重用的工具模块中，使得工作流脚本（`workflows/`）保持简洁，专注于任务编排。
 - **高质量翻译策略**: 通过"预合并-翻译-后拆分"的智能处理流程，在保证时间轴基本准确的前提下，获得更连贯、更符合上下文的翻译质量。
+- **统一的日志系统**: 所有工作流均采用统一的日志记录器，为每次运行生成独立的、带时间戳的日志文件，便于追踪和调试。
 
 ## 架构与工作流
 
@@ -16,7 +17,7 @@
 所有工作流共享一个统一的翻译入口：`llm_utils.translator.execute_translation` 函数。该函数封装了与大语言模型交互的所有复杂性，包括批处理、构建提示、调用API、解析结果和执行数据完整性检查。
 
 工作流的核心流程如下：
-1. **数据准备**: 工作流脚本调用 `youtube_utils` 或 `format_converters` 来获取源数据。
+1. **数据准备**: 工作流脚本调用 `youtube_utils` 或 `format_converters` 中相应的**高级函数**来获取和预处理源数据。
 2. **格式适配**: 使用 `common_utils.json_handler` 将源数据转换为统一的"富数据格式"。
 3. **执行翻译**: 将适配后的数据交给 `execute_translation` 函数进行翻译。
 4. **生成输出**: 使用 `format_converters` 将翻译结果重构为最终的 `.srt` 或 `.md` 文件。
@@ -24,17 +25,17 @@
 ```mermaid
 graph TD;
     subgraph A[工作流1: YouTube视频]
-        A1("YouTube 链接") --> A2["youtube_utils<br/>获取字幕数据"];
-        A2 --> A3["common_utils.json_handler<br/><b>适配为标准富数据</b>"];
+        A1("YouTube 链接") --> A2["youtube_utils<br/><b>fetch_and_prepare_transcript</b><br/>获取并预处理字幕"];
+        A2 --> A3["common_utils.json_handler<br/>适配为标准富数据"];
     end
 
     subgraph B[工作流2: 本地文件]
-        B1("本地 .srt 文件") --> B2["format_converters<br/>解析字幕数据"];
-        B2 --> B3["common_utils.json_handler<br/><b>适配为标准富数据</b>"];
+        B1("本地 .srt 文件") --> B2["format_converters<br/><b>load_and_merge_srt_segments</b><br/>加载并合并字幕"];
+        B2 --> B3["common_utils.json_handler<br/>适配为标准富数据"];
     end
 
     subgraph C[核心翻译引擎]
-        C0["execute_translation<br/><b>统一翻译入口</b>"] --> C1["llm_utils.batching<br/>智能批处理"];
+        C0["execute_translation<br/>统一翻译入口"] --> C1["llm_utils.batching<br/>智能批处理"];
         C1 --> C2["llm_utils.prompt_builder<br/>构建提示词"];
         C2 --> C3["llm_utils.Translator<br/>调用LLM API"];
         C3 --> C4["llm_utils.response_parser<br/>解析与验证响应"];
@@ -43,21 +44,19 @@ graph TD;
     A3 --> C0;
     B3 --> C0;
     
-    C4 --> D["format_converters<br/>后处理与生成<br/>(SRT, Markdown)"];
+    C4 --> D["format_converters<br/><b>segments_to_srt_string</b><br/>后处理与生成(SRT, MD)"];
 ```
 
 ## 项目结构说明
 
 - `workflows/`: **核心工作流编排**。项目的入口，每个文件代表一个完整的端到端任务。
 - `llm_utils/`: **大语言模型交互**。封装了与LLM API的通信逻辑。
-  - `translator.py`: 包含统一的 `Translator` 核心翻译类。
-  - `prompt_builder.py`: 负责构建发送给LLM的详细指令。
-  - `batching.py`: 负责将大量文本智能地拆分为适合API处理的批次。
-  - `response_parser.py`: 负责解析和验证LLM返回的结果，确保数据质量。
-- `youtube_utils/`: **YouTube数据获取**。封装了所有与YouTube相关的下载逻辑。
-- `format_converters/`: **数据转换与处理**。负责文件的解析、字幕的预处理（合并）、后处理（拆分）和最终文件的生成。
+- `youtube_utils/`: **YouTube数据获取**。封装了所有与YouTube相关的下载和处理逻辑，提供高级接口如 `fetch_and_prepare_transcript`。
+- `format_converters/`: **数据转换与处理**。负责文件的解析、字幕的预处理、后处理和最终文件内容的生成。提供 `load_and_merge_srt_segments` 和 `segments_to_srt_string` 等核心函数。
 - `common_utils/`: **通用工具库**。存放项目通用的辅助函数。
-  - `json_handler.py`: **包含关键的数据适配器 `create_pre_translate_json_objects`**。
+  - `json_handler.py`: 包含关键的数据适配器 `create_pre_translate_json_objects`。
+  - `file_helpers.py`: 提供通用的文件操作函数，如 `save_to_file`。
+  - `log_config.py`: 提供统一的任务日志记录器 `setup_task_logger`。
 
 
 ## 快速开始 (Quick Start)
@@ -88,6 +87,7 @@ python workflows/translate_youtube_video.py "YOUTUBE_VIDEO_URL_OR_ID" --target_l
 ```
 - **`video_url_or_id`**: (必需) YouTube视频的完整URL或视频ID。
 - **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
+- **`--log_level`**: (可选) 设置日志级别 (如 `DEBUG`, `INFO`)，默认为 `INFO`。
 
 #### 翻译本地 SRT 文件
 
@@ -96,9 +96,10 @@ python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_la
 ```
 - **`file_path`**: (必需) 本地 `.srt` 字幕文件的完整路径。
 - **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
+- **`--log_level`**: (可选) 设置日志级别 (如 `DEBUG`, `INFO`)，默认为 `INFO`。
 
 
-所有生成的文件，包括日志和翻译结果，将被保存在项目目录外的一个名为 `GlobalWorkflowOutputs` 的文件夹中，并以视频标题或文件名分类存放。
+所有生成的文件，包括日志和翻译结果，将被保存在项目目录外的一个名为 `GlobalWorkflowOutputs` 或 `outputs` 的文件夹中，并以视频标题或文件名分类存放。
 
 ## 已知问题与处理
 
@@ -106,7 +107,5 @@ python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_la
 
 - **问题现象**: 在处理某些YouTube视频时，日志中可能会出现关于"负时长" (`Negative duration detected`) 的警告。
 - **根本原因**: 这是由于 YouTube 的自动语音识别 (ASR) 系统在生成字幕时，可能产生微小的时间戳误差，导致某个字幕片段的计算出的结束时间早于其开始时间。这属于上游数据源的固有问题。
-- **处理策略**:
-  - **旧版行为**: 直接丢弃这些存在时间戳问题的字幕片段，导致翻译内容丢失。
-  - **当前修复**: 在 `youtube_utils/data_fetcher.py` 的 `preprocess_and_merge_segments` 函数中，我们不再丢弃这些片段。而是将它们的**时长修正为0**，并保留其文本内容。
+- **处理策略**: 在 `youtube_utils/data_fetcher.py` 的 `preprocess_and_merge_segments` 函数中，我们不再丢弃这些片段，而是将它们的**时长修正为0**，并保留其文本内容。
 - **结果**: 这样可以确保即使源数据存在微瑕，也不会丢失任何需要翻译的文本内容，保证了翻译的完整性。虽然在生成的SRT文件中，这些片段会成为"零时长"字幕（一闪而过），但这远优于丢失整句内容。

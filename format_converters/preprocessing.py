@@ -64,3 +64,30 @@ def merge_consecutive_segments(subtitle_segments, max_len=130, max_gap_seconds=1
     flush_buffer()  # Flush any remaining subtitles
 
     return merged_subtitles, total_words 
+
+def load_and_merge_srt_segments(file_path, logger):
+    """
+    Loads segments from an SRT file and merges consecutive segments
+    to provide better context for translation.
+
+    Args:
+        file_path (Path): The path to the SRT file.
+        logger: A logger instance for logging messages.
+
+    Returns:
+        A list of merged subtitle segments, or None if the file is empty.
+    """
+    from .srt_handler import srt_to_segments  # Local import to avoid circular dependency
+    
+    logger.info(f"Reading and formatting SRT file: {file_path}")
+    raw_subtitle_segments = srt_to_segments(file_path)
+    if not raw_subtitle_segments:
+        logger.error("No segments found in the SRT file. Aborting.")
+        return None
+        
+    logger.info(f"Loaded {len(raw_subtitle_segments)} raw segments from SRT file.")
+
+    # Merge subtitles for better translation context
+    merged_segments, _ = merge_consecutive_segments(raw_subtitle_segments)
+    logger.info(f"Merged into {len(merged_segments)} segments for translation.")
+    return merged_segments 
