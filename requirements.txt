@@ -8,3 +8,6 @@ urllib3==2.4.0
 youtube-transcript-api==1.0.3
 google-generativeai
 pytubefix
+pydantic
+ebooklib
+beautifulsoup4

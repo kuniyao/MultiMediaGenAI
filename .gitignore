@@ -136,4 +136,36 @@ llm_raw_responses_*.jsonl
 Thumbs.db
 
 # Custom
+outputs/
+*.json
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static analyzer
+.pytype/
+
+# Output directories
+/GlobalWorkflowOutputs/
+/outputs/
+*.log
+llm_raw_responses_*.jsonl
+
+# IDE / Editor specific files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Custom
 outputs/ 
