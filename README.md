@@ -112,7 +112,6 @@ python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_la
 - **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
 - **`--log_level`**: (可选) 设置日志级别 (如 `DEBUG`, `INFO`)，默认为 `INFO`。
 
-
 所有生成的文件，包括日志和翻译结果，将被保存在项目目录外的一个名为 `GlobalWorkflowOutputs` 或 `outputs` 的文件夹中，并以视频标题或文件名分类存放。
 
 ## 已知问题与处理
