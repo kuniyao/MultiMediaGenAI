@@ -162,6 +162,7 @@ llm_raw_responses_*.jsonl
 *.swp
 *.swo
 *~
+*.epub
 
 # OS generated files
 .DS_Store
