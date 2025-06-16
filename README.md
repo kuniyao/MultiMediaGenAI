@@ -6,6 +6,11 @@
 
 - **YouTube 视频翻译**: 输入一个YouTube视频链接，自动获取官方或自动生成的字幕，并将其翻译成指定语言。
 - **本地文件翻译**: 支持直接翻译本地的 `.srt` 字幕文件。
+- **EPUB 文件处理**:
+  - **深度解析**: 不仅仅是提取文本，而是深度解析EPUB的内部结构，包括元数据、资源清单、阅读顺序(Spine)、目录(NCX/NAV)等。
+  - **结构保持**: 能够准确识别并重建复杂的HTML结构，如带容器的图片、嵌套列表、以及由普通`<p>`标签模拟的"伪列表"。
+  - **样式保真**: 精确保留并应用原始的CSS类，同时能处理由HTML标签（如`<strong><small>...</small></strong>`）定义的复杂内联样式，确保转换后的文件在视觉上与原书高度一致。
+  - **端到端流程**: 提供从EPUB解析、内容提取、翻译到重新打包生成新EPUB文件的完整工作流。
 - **模块化与可扩展**: 项目遵循高内聚、低耦合的设计原则。核心功能（如日志记录、文件生成、数据获取与处理）都被封装在可重用的工具模块中。
 - **统一的核心处理逻辑**:
   - **智能预处理**: 所有字幕（无论来源）都通过统一的 `merge_segments_intelligently` 函数进行预处理，该函数能将零散的片段智能地合并为完整的句子，极大地提升了翻译的上下文连贯性。
@@ -16,7 +21,9 @@
 
 本项目的架构经过重构，实现了核心处理逻辑的统一。`workflows/` 目录下的脚本负责定义和编排任务，而具体的执行逻辑则由可复用的工具模块（如 `llm_utils`, `format_converters`）提供。
 
-所有工作流共享一个统一的翻译入口 `llm_utils.translator.execute_translation`，以及统一的字幕预处理和后处理流程。
+### 字幕翻译工作流
+
+所有字幕工作流共享一个统一的翻译入口 `llm_utils.translator.execute_translation`，以及统一的字幕预处理和后处理流程。
 
 工作流的核心流程如下：
 1. **数据获取**: 工作流脚本调用 `youtube_utils` 或 `format_converters` 获取原始字幕数据。
@@ -57,12 +64,59 @@ graph TD;
     end
 ```
 
+### EPUB 处理工作流
+
+```mermaid
+graph TD;
+    subgraph Input [输入]
+        A[EPUB 文件]
+    end
+
+    subgraph Parsing [解析阶段 - EpubParser]
+        direction LR
+        B1["解压EPUB到临时目录"]
+        B2["解析 container.xml<br>找到 .opf 文件"]
+        B3["解析 .opf 文件<br>(元数据, manifest, spine)"]
+        B4["解析 nav.xhtml/toc.ncx<br>获取目录和章节标题"]
+        B5["逐一解析章节HTML<br>映射到内部数据模型(Book)"]
+    end
+
+    subgraph Processing [处理与翻译]
+        C1["提取Book对象中的文本内容"]
+        C2["调用LLM进行翻译"]
+        C3["将翻译结果写回Book对象"]
+    end
+
+    subgraph Writing [生成阶段 - EpubWriter]
+        direction LR
+        D1["创建EPUB文件结构"]
+        D2["写入资源文件<br>(CSS, 图片)"]
+        D3["根据更新后的Book对象<br>生成新的章节XHTML"]
+        D4["生成新的配置文件<br>(content.opf, nav.xhtml)"]
+        D5["打包生成最终的EPUB文件"]
+    end
+
+    Input --> Parsing;
+    A --> B1 --> B2 --> B3 --> B4 --> B5;
+    Parsing --> Processing;
+    B5 -- book_obj --> C1;
+    C1 --> C2 --> C3;
+    Processing --> Writing;
+    C3 -- updated_book_obj --> D1 --> D2 --> D3 --> D4 --> D5;
+    subgraph Output [输出]
+        E[翻译后的新 EPUB 文件]
+    end
+    D5 --> E;
+```
+
 ## 项目结构说明
 
 - `workflows/`: **核心工作流编排**。项目的入口，每个文件代表一个完整的端到端任务。
 - `llm_utils/`: **大语言模型交互**。封装了与LLM API的通信逻辑。
 - `youtube_utils/`: **YouTube数据获取**。封装了所有与YouTube相关的下载和处理逻辑。
 - `format_converters/`: **数据转换与处理**。负责文件的解析、字幕的预处理、后处理和最终文件内容的生成。
+  - `epub_parser.py`: 提供了强大的 `EpubParser` 类，用于深度解析EPUB文件。
+  - `epub_writer.py`: 提供了 `EpubWriter` 类，用于根据内部数据模型重建EPUB文件。
   - `preprocessing.py`: 包含核心的智能片段合并逻辑 `merge_segments_intelligently`。
   - `postprocessing.py`: 包含核心的翻译后优化逻辑 `generate_post_processed_srt`。
   - `srt_handler.py`: 负责SRT格式的基础解析与生成。
