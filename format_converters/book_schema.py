@@ -1,11 +1,10 @@
 from __future__ import annotations
-from typing import List, Union, Literal, Optional, Dict
+from typing import List, Union, Literal, Optional, Dict, Annotated
 from pydantic import BaseModel, Field, field_serializer, field_validator
 import base64
 
 # ==============================================================================
-# 1. 行内内容元素 (Inline Content Items)
-# 这些是构成段落富文本内容的最小单位。
+#  元数据模型 (Metadata Models)
 # ==============================================================================
 
 class TextItem(BaseModel):
@@ -14,35 +13,42 @@ class TextItem(BaseModel):
     content: str
 
 class BoldItem(BaseModel):
-    """粗体文本"""
+    """加粗的文本"""
     type: Literal["bold"] = "bold"
-    content: str
+    content: List[RichContentItem] = Field(..., description="加粗内容，可以是文本或其他富文本项")
 
 class ItalicItem(BaseModel):
-    """斜体文本"""
+    """斜体的文本"""
     type: Literal["italic"] = "italic"
-    content: str
+    content: List[RichContentItem] = Field(..., description="斜体内容，可以是文本或其他富文本项")
 
 class HyperlinkItem(BaseModel):
-    """超链接 (<a> 标签)"""
+    """超链接"""
     type: Literal["hyperlink"] = "hyperlink"
-    href: str  # URL 或锚点链接
-    content: str # 可点击的文本
-    title: Optional[str] = None # <a> 标签的 title 属性
+    href: str
+    content: List[RichContentItem] = Field(..., description="链接的可视内容")
+    title: Optional[str] = None
 
 class LineBreakItem(BaseModel):
-    """换行符 (<br> 标签)"""
+    """换行符 <br>"""
     type: Literal["line_break"] = "line_break"
 
 class NoteReferenceItem(BaseModel):
-    """脚注/尾注在正文中的引用标记"""
+    """脚注/尾注的引用标记"""
     type: Literal["note_reference"] = "note_reference"
-    marker: str
-    note_id: str
+    marker: str # e.g., "[1]"
+    note_id: str # e.g., "note1"
+
+class SmallItem(BaseModel):
+    """小号字体 <small>"""
+    type: Literal["small"] = "small"
+    content: List[RichContentItem] = Field(..., description="小号字体内容")
 
 # 将所有行内元素合并为一个联合类型
-RichContentItem = Union[TextItem, BoldItem, ItalicItem, HyperlinkItem, NoteReferenceItem, LineBreakItem]
-
+RichContentItem = Annotated[
+    Union[TextItem, BoldItem, ItalicItem, HyperlinkItem, LineBreakItem, NoteReferenceItem, SmallItem],
+    Field(discriminator="type")
+]
 
 # ==============================================================================
 # 2. 块级内容元素 (Block Content Items)

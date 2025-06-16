@@ -14,7 +14,7 @@ from .book_schema import (
     TableBlock, NoteContentBlock, MarkerBlock, CodeBlock,
     RichContentItem, TextItem, BoldItem, ItalicItem, HyperlinkItem,
     LineBreakItem, NoteReferenceItem, ListItem, TableContent,
-    CellContent, Row, CodeLine
+    CellContent, Row, CodeLine, SmallItem
 )
 
 
@@ -322,9 +322,16 @@ class EpubParser:
                         pseudo_list_tags = [tag]
                         
                         # 这个循环需要安全地在原始的 tags_to_process 列表中查看
+                        start_of_pseudo_list = current_tag_index
                         while current_tag_index < len(tags_to_process):
                             next_tag = tags_to_process[current_tag_index]
-                            if isinstance(next_tag, Tag) and next_tag.name == 'p' and 'bullet' in (next_tag.get('class') or []):
+                            
+                            # 跳过非标签节点（例如，空白换行符）
+                            if not isinstance(next_tag, Tag):
+                                current_tag_index += 1
+                                continue
+                            
+                            if next_tag.name == 'p' and 'bullet' in (next_tag.get('class') or []):
                                 pseudo_list_tags.append(next_tag)
                                 current_tag_index += 1 # 跳过我们已经处理的兄弟节点
                             else:
@@ -334,6 +341,9 @@ class EpubParser:
                         block = self._parse_pseudo_list_block(pseudo_list_tags)
                         if block:
                             blocks.append(block)
+                        
+                        # 外层循环会自增，所以这里将索引回退一格，以确保下一轮从正确的位置开始
+                        current_tag_index -= 1
                         continue
 
                 block = self._map_tag_to_block(tag, chapter_base_dir)
@@ -361,10 +371,6 @@ class EpubParser:
         """
         tag_name = tag.name
         
-        # 标题
-        if tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
-            return self._parse_heading_block(tag)
-        
         # 图片: 优先处理图片和图片容器
         if tag_name == 'img':
             return self._parse_image_block(tag, chapter_base_dir)
@@ -379,6 +385,10 @@ class EpubParser:
                     block.css_classes = self._get_css_classes(tag)
                 return block
 
+        # 标题
+        if tag_name in ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']:
+            return self._parse_heading_block(tag)
+        
         # 段落 (在图片之后处理)
         if tag_name == 'p':
             return self._parse_paragraph_block(tag)
@@ -413,7 +423,7 @@ class EpubParser:
 
     def _parse_rich_content(self, tag: Tag) -> List[RichContentItem]:
         """
-        将一个标签内的混合内容（文本、<b>、<i>、<a>等）解析为 RichContentItem 列表。
+        将一个标签内的混合内容（文本、<b>、<i>、<a>等）递归解析为 RichContentItem 列表。
         """
         items: List[RichContentItem] = []
         for content in tag.contents:
@@ -423,9 +433,11 @@ class EpubParser:
                     items.append(TextItem(content=content))
             elif isinstance(content, Tag):
                 if content.name in ['b', 'strong']:
-                    items.append(BoldItem(content=content.text))
+                    items.append(BoldItem(content=self._parse_rich_content(content)))
                 elif content.name in ['i', 'em']:
-                    items.append(ItalicItem(content=content.text))
+                    items.append(ItalicItem(content=self._parse_rich_content(content)))
+                elif content.name == 'small':
+                     items.append(SmallItem(content=self._parse_rich_content(content)))
                 elif content.name == 'a':
                     # 检查是否为脚注引用
                     epub_type = content.get('epub:type')
@@ -437,7 +449,7 @@ class EpubParser:
                     else:
                         items.append(HyperlinkItem(
                             href=content.get('href', ''),
-                            content=content.text,
+                            content=self._parse_rich_content(content),
                             title=content.get('title')
                         ))
                 elif content.name == 'br':
@@ -629,12 +641,16 @@ class EpubParser:
             ListItem(content=self._parse_rich_content(tag)) for tag in tags
         ]
         
+        # 获取现有的class，并添加一个特殊的标记class，用于在写入时识别
+        css_classes = self._get_css_classes(tags[0]) or []
+        css_classes.append('pseudo-list-marker')
+        
         # 注意：这种伪列表我们假定其为无序列表
         return ListBlock(
             id=self._generate_id(),
             ordered=False,
             items_source=items,
-            css_classes=self._get_css_classes(tags[0]) # 使用第一个标签的class
+            css_classes=css_classes
         )
 
     def __del__(self):

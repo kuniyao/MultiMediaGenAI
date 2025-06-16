@@ -10,7 +10,7 @@ from .book_schema import (
     Book, Chapter, AnyBlock, RichContentItem, HeadingBlock, ParagraphBlock,
     ImageBlock, ListBlock, TableBlock, TextItem, BoldItem, ItalicItem,
     HyperlinkItem, LineBreakItem, NoteReferenceItem, CodeBlock, MarkerBlock,
-    NoteContentBlock
+    NoteContentBlock, SmallItem
 )
 
 
@@ -193,7 +193,7 @@ class EpubWriter:
 
     def _add_css_classes(self, tag: Tag, block: AnyBlock):
         """将block中的css_classes添加到tag中。"""
-        if block.css_classes:
+        if hasattr(block, 'css_classes') and block.css_classes:
             tag['class'] = " ".join(block.css_classes)
 
     def _map_heading_to_html(self, block: HeadingBlock, soup: BeautifulSoup) -> Tag:
@@ -236,7 +236,24 @@ class EpubWriter:
         """将 ListBlock 转换为 <ul> 或 <ol> 标签，并递归处理其项目。"""
         list_tag_name = "ol" if block.ordered else "ul"
         list_tag = soup.new_tag(list_tag_name)
-        self._add_css_classes(list_tag, block)
+
+        # 检查是否为由<p>标签转换而来的伪列表
+        is_pseudo_list = False
+        final_classes = block.css_classes
+        # 检查标记class
+        if final_classes and 'pseudo-list-marker' in final_classes:
+            is_pseudo_list = True
+            # 创建一个不包含我们内部标记的新列表
+            final_classes = [c for c in final_classes if c != 'pseudo-list-marker']
+
+        # 应用清理后的class
+        if final_classes:
+            list_tag['class'] = " ".join(final_classes)
+
+        # 如果是伪列表，通过内联样式移除默认的列表项目符号和内边距，
+        # 以便完全由CSS class来控制其外观。
+        if is_pseudo_list:
+            list_tag['style'] = 'list-style-type: none; padding-left: 0;'
 
         for item in block.items_source:
             li_tag = soup.new_tag("li")
@@ -338,17 +355,17 @@ class EpubWriter:
                 parent_tag.append(item.content)
             elif item_type == "bold":
                 b_tag = soup.new_tag("b")
-                b_tag.string = item.content
+                self._map_rich_content_to_html(b_tag, item.content, soup)
                 parent_tag.append(b_tag)
             elif item_type == "italic":
                 i_tag = soup.new_tag("i")
-                i_tag.string = item.content
+                self._map_rich_content_to_html(i_tag, item.content, soup)
                 parent_tag.append(i_tag)
             elif item_type == "hyperlink":
                 a_tag = soup.new_tag("a", href=item.href)
                 if item.title:
                     a_tag['title'] = item.title
-                a_tag.string = item.content
+                self._map_rich_content_to_html(a_tag, item.content, soup)
                 parent_tag.append(a_tag)
             elif item_type == "line_break":
                 br_tag = soup.new_tag("br")
@@ -359,6 +376,10 @@ class EpubWriter:
                 a_tag['epub:type'] = 'noteref'
                 a_tag.string = item.marker # 显示的引用标记，如 [1]
                 parent_tag.append(a_tag)
+            elif item_type == "small":
+                small_tag = soup.new_tag("small")
+                self._map_rich_content_to_html(small_tag, item.content, soup)
+                parent_tag.append(small_tag)
 
     def _write_container_xml(self):
         """生成 META-INF/container.xml 文件。"""
