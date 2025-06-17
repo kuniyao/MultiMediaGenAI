@@ -199,7 +199,8 @@ class EpubWriter:
     def _map_heading_to_html(self, block: HeadingBlock, soup: BeautifulSoup) -> Tag:
         """将 HeadingBlock 转换为 <h1>, <h2> ... 标签。"""
         tag = soup.new_tag(f"h{block.level}")
-        tag.string = block.content_source # 假设标题不包含富文本
+        # 优先使用翻译后的目标内容
+        tag.string = block.content_target if block.content_target else block.content_source
         self._add_css_classes(tag, block)
         return tag
 
@@ -207,7 +208,9 @@ class EpubWriter:
         """将 ParagraphBlock 转换为 <p> 标签，并处理其内部的富文本。"""
         p_tag = soup.new_tag("p")
         self._add_css_classes(p_tag, block)
-        self._map_rich_content_to_html(p_tag, block.content_rich_source, soup)
+        # 优先使用翻译后的目标富文本内容
+        content_to_map = block.content_rich_target if block.content_rich_target else block.content_rich_source
+        self._map_rich_content_to_html(p_tag, content_to_map, soup)
         return p_tag
 
     def _map_image_to_html(self, block: ImageBlock, soup: BeautifulSoup) -> Tag:
@@ -216,7 +219,9 @@ class EpubWriter:
         file_name = pathlib.Path(block.path).name
         relative_path = f"../images/{file_name}"
         
-        img_tag = soup.new_tag("img", src=relative_path, alt=block.content_source)
+        # 优先使用翻译后的图片描述作为 alt 文本
+        alt_text = block.content_target if block.content_target else block.content_source
+        img_tag = soup.new_tag("img", src=relative_path, alt=alt_text)
         if block.img_css_classes:
             img_tag['class'] = " ".join(block.img_css_classes)
 
@@ -237,6 +242,8 @@ class EpubWriter:
         list_tag_name = "ol" if block.ordered else "ul"
         list_tag = soup.new_tag(list_tag_name)
 
+        items_to_map = block.items_target if block.items_target else block.items_source
+
         # 检查是否为由<p>标签转换而来的伪列表
         is_pseudo_list = False
         final_classes = block.css_classes
@@ -250,24 +257,21 @@ class EpubWriter:
         if final_classes:
             list_tag['class'] = " ".join(final_classes)
 
-        # 如果是伪列表，通过内联样式移除默认的列表项目符号和内边距，
-        # 以便完全由CSS class来控制其外观。
-        if is_pseudo_list:
-            list_tag['style'] = 'list-style-type: none; padding-left: 0;'
-
-        for item in block.items_source:
+        for item in items_to_map:
             li_tag = soup.new_tag("li")
-            
-            # 填充列表项的富文本内容
             self._map_rich_content_to_html(li_tag, item.content, soup)
             
-            # 递归处理嵌套列表
+            # 处理嵌套列表
             if item.nested_list:
                 nested_list_tag = self._map_list_to_html(item.nested_list, soup)
-                li_tag.append(nested_list_tag)
+                if nested_list_tag:
+                    li_tag.append(nested_list_tag)
+            
+            if is_pseudo_list:
+                # 对于伪列表的<li>标签，添加一个特定的类名以应用CSS ::before 伪元素
+                li_tag['class'] = 'pseudo-list-item'
             
             list_tag.append(li_tag)
-            
         return list_tag
 
     def _map_table_to_html(self, block: TableBlock, soup: BeautifulSoup) -> Tag:
@@ -275,29 +279,31 @@ class EpubWriter:
         table_tag = soup.new_tag("table")
         self._add_css_classes(table_tag, block)
         
-        # 处理表头
-        if block.content_source.headers:
-            thead_tag = soup.new_tag("thead")
-            for header_row_data in block.content_source.headers:
-                tr_tag = soup.new_tag("tr")
-                for cell_data in header_row_data:
-                    th_tag = soup.new_tag("th")
-                    self._map_rich_content_to_html(th_tag, cell_data, soup)
-                    tr_tag.append(th_tag)
-                thead_tag.append(tr_tag)
-            table_tag.append(thead_tag)
+        # 优先使用翻译后的目标表格内容
+        content_to_map = block.content_target if (block.content_target and (block.content_target.headers or block.content_target.rows)) else block.content_source
+
+        # 渲染表头
+        if content_to_map.headers:
+            thead = soup.new_tag("thead")
+            tr = soup.new_tag("tr")
+            for cell_content in content_to_map.headers:
+                th = soup.new_tag("th")
+                self._map_rich_content_to_html(th, cell_content, soup)
+                tr.append(th)
+            thead.append(tr)
+            table_tag.append(thead)
             
-        # 处理表体
-        if block.content_source.rows:
-            tbody_tag = soup.new_tag("tbody")
-            for row_data in block.content_source.rows:
-                tr_tag = soup.new_tag("tr")
-                for cell_data in row_data:
-                    td_tag = soup.new_tag("td")
-                    self._map_rich_content_to_html(td_tag, cell_data, soup)
-                    tr_tag.append(td_tag)
-                tbody_tag.append(tr_tag)
-            table_tag.append(tbody_tag)
+        # 渲染数据行
+        if content_to_map.rows:
+            tbody = soup.new_tag("tbody")
+            for row_data in content_to_map.rows:
+                tr = soup.new_tag("tr")
+                for cell_content in row_data:
+                    td = soup.new_tag("td")
+                    self._map_rich_content_to_html(td, cell_content, soup)
+                    tr.append(td)
+                tbody.append(tr)
+            table_tag.append(tbody)
             
         return table_tag
 
@@ -315,6 +321,21 @@ class EpubWriter:
         code_tag.string = code_text
 
         pre_tag.append(code_tag)
+
+        # 优先使用翻译后的目标结构化内容
+        content_to_map = block.content_structured_target if block.content_structured_target else block.content_structured_source
+
+        # 逐行处理代码或注释
+        for line in content_to_map:
+            if line.type == "code":
+                code_tag.append(line.value)
+                code_tag.append(soup.new_tag("br"))
+            elif line.type == "comment":
+                comment_span = soup.new_tag("span", attrs={"class": "comment"})
+                comment_span.string = line.value
+                code_tag.append(comment_span)
+                code_tag.append(soup.new_tag("br"))
+        
         return pre_tag
 
     def _map_marker_to_html(self, block: MarkerBlock, soup: BeautifulSoup) -> Optional[Tag]:
@@ -329,18 +350,17 @@ class EpubWriter:
         return None
 
     def _map_note_content_to_html(self, block: NoteContentBlock, soup: BeautifulSoup) -> Tag:
-        """将 NoteContentBlock 转换为带有 epub:type='rearnote' 的 <div>。"""
-        # 脚注/尾注通常被包裹在一个div或section中
-        # 我们使用 <div> 并添加语义化的 epub:type
+        """将脚注/尾注内容块转换为HTML。"""
+        # 脚注/尾注容器，通常是一个 div
         note_div = soup.new_tag("div")
-        note_div['epub:type'] = 'rearnote' # 或者 'footnote'
         self._add_css_classes(note_div, block)
-        if block.id:
-             note_div['id'] = block.id # 将块的ID赋给div，以便被引用
+        note_div['id'] = block.id # 使用块的ID作为HTML元素的ID
 
-        # 脚注内容本身也可以是复杂的，包含多个段落、列表等
-        # 所以我们递归地调用 _map_block_to_html
-        for inner_block in block.content_source:
+        # 优先使用翻译后的目标内容
+        content_to_map = block.content_target if block.content_target else block.content_source
+
+        # 在容器内部渲染脚注的实际内容
+        for inner_block in content_to_map:
             html_element = self._map_block_to_html(inner_block, soup)
             if html_element:
                 note_div.append(html_element)

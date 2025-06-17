@@ -23,7 +23,7 @@ PREFERRED_TRANSCRIPT_LANGUAGES = ['en'] # Default to English
 DEFAULT_TARGET_TRANSLATION_LANGUAGE = "zh-CN" # Default target language for translation
 
 # LLM Batching Configuration for Gemini JSON Mode
-TARGET_PROMPT_TOKENS_PER_BATCH = 250000  # Target token limit for the entire prompt string sent to Gemini
+TARGET_PROMPT_TOKENS_PER_BATCH = 8000  # Target token limit for the entire prompt string sent to Gemini. A safer, more reasonable value.
 MAX_SEGMENTS_PER_GEMINI_JSON_BATCH = 100 # Max segments in a single batch for Gemini JSON translation
 
 # Separator used to join multiple text segments for batch translation (OLD METHOD - no longer used by Gemini JSON)

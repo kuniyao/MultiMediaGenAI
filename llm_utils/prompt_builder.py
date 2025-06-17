@@ -1,4 +1,5 @@
 import json
+from typing import List, Dict, Optional
 
 def construct_prompt_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key, use_simplified_ids=False):
     """
@@ -49,3 +50,62 @@ def construct_prompt_for_batch(segments_list_for_payload, src_lang, tgt_lang, ou
         "Pay EXTREME ATTENTION to the ID PRESERVATION requirement detailed in the instructions: the 'id' field for each segment in your response MUST be an IDENTICAL, UNCHANGED copy of the 'id' field from the input segment.\n\n"
         f"JSON Request:\n```json\n{json.dumps(json_payload_for_prompt, indent=2, ensure_ascii=False)}\n```"
     ) 
+
+def build_translation_prompt(system_prompt: str, user_prompt: str, task_list_json: str) -> List[Dict[str, str]]:
+    pass
+    # ... (existing function)
+
+def build_book_translation_prompt(
+    book_title: str,
+    source_lang: str,
+    target_lang: str,
+    tone_style: str,
+    writing_style: str,
+    task_list_json: str,
+    glossary: Optional[Dict[str, str]] = None
+) -> str:
+    """
+    构建用于书籍章节翻译的、高度定制化的Prompt。
+
+    Args:
+        book_title: 书籍的标题.
+        source_lang: 源语言.
+        target_lang: 目标语言.
+        tone_style: 作者的语气描述 (e.g., 'academic, witty, formal').
+        writing_style: 写作风格描述 (e.g., 'concise and direct').
+        task_list_json: 包含待翻译任务的JSON字符串。
+        glossary: 可选的术语表。
+
+    Returns:
+        一个完整的、准备好发送给LLM的Prompt字符串。
+    """
+    
+    # 1. 构建Prompt的主要部分
+    prompt_parts = [
+        f"# ROLE\nYou are an expert literary translator, tasked with translating a chapter from a non-fiction book titled \"{book_title}\" from {source_lang} to {target_lang}.",
+        
+        f"# TONE & STYLE\nThe original author's tone is {tone_style}. Your translation MUST faithfully capture this specific tone. The writing style is {writing_style}. You must replicate this style in the translated text.",
+        
+        "# ACCURACY & FIDELITY\nYou must be extremely faithful to the original text. Do not add information that is not present, and do not omit any details. Your primary goal is to convey the author's exact meaning with precision.",
+        
+        f"# FLUENCY & NATURALNESS\nWhile maintaining accuracy, the final translation must be fluent, natural, and idiomatic in {target_lang}. It should read like it was originally written by a native speaker, not like a literal, robotic translation."
+    ]
+
+    # 2. 如果有术语表，则添加术语表部分
+    if glossary:
+        glossary_items = "\n".join([f'* "{term}": "{translation}"' for term, translation in glossary.items()])
+        glossary_section = f"# GLOSSARY (Optional but highly recommended)\nUse the following terms and names consistently. Do not translate them differently.\n{glossary_items}"
+        prompt_parts.append(glossary_section)
+
+    # 3. 添加技术指令和任务描述
+    prompt_parts.extend([
+        "# TECHNICAL INSTRUCTIONS\nThe input text may contain simplified HTML-like tags (e.g., <b> for bold, <i> for italic). You MUST preserve these tags in your translation, wrapping the corresponding translated words.\nFor example, if the input is \"This is <b>important</b>.\", your translated output should be \"这是<b>重要的</b>。\" (This is an example, use the actual translation).",
+        
+        "# TASK\nNow, please translate the `text_with_markup` field for each JSON object in the following array. Your output MUST be a valid JSON array with the exact same structure, containing the translated text.",
+        
+        "--- START OF INPUT DATA ---",
+        task_list_json,
+        "--- END OF INPUT DATA ---"
+    ])
+    
+    return "\n\n".join(prompt_parts) 

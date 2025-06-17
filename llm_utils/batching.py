@@ -1,9 +1,59 @@
 import json
 import config
 from llm_utils.prompt_builder import construct_prompt_for_batch
+import logging
+
+# Configure a basic logger if no configuration is provided
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # A conservative estimate for characters per token. 2.5 is a safe bet for JSON with English.
 CHARS_PER_TOKEN_ESTIMATE = 2.5 
+
+def get_batches_for_translation(task_list: list, text_key: str = "text_with_markup") -> list:
+    """
+    一个简化的包装函数，用于将翻译任务列表分割成适合LLM处理的批次。
+
+    Args:
+        task_list (list): 待翻译的任务字典列表。
+        text_key (str): 任务字典中包含待翻译文本的键。
+
+    Returns:
+        list: 一个批次列表，其中每个批次是任务字典的列表。
+    """
+    TARGET_CHAR_COUNT_PER_BATCH = config.TARGET_PROMPT_TOKENS_PER_BATCH * CHARS_PER_TOKEN_ESTIMATE
+
+    all_batches = []
+    current_batch = []
+    current_char_count = 0
+
+    if not task_list:
+        return []
+
+    for task in task_list:
+        # 估算任务的字符成本 (以JSON字符串形式)
+        # 我们只关心文本字段的长度，因为其他字段（如ID）的开销相对较小且固定。
+        text_content = task.get(text_key, "")
+        task_char_count = len(text_content) # 主要成本
+
+        # 检查如果添加这个任务是否会超出限制
+        if current_batch and (current_char_count + task_char_count > TARGET_CHAR_COUNT_PER_BATCH):
+            # 完成当前批次
+            all_batches.append(list(current_batch))
+            # 开始新批次
+            current_batch = [task]
+            current_char_count = task_char_count
+        else:
+            # 添加到当前批次
+            current_batch.append(task)
+            current_char_count += task_char_count
+            
+    # 添加最后一个批次
+    if current_batch:
+        all_batches.append(list(current_batch))
+
+    logger.info(f"Prepared {len(all_batches)} batches for translation.")
+    return all_batches
 
 def create_batches_by_char_limit(
     all_segments, 
