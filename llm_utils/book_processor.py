@@ -1,11 +1,13 @@
 from __future__ import annotations
-from typing import List, Dict, TYPE_CHECKING
-from bs4 import BeautifulSoup, NavigableString, Tag
+from typing import List, Dict, TYPE_CHECKING, cast
+from bs4 import BeautifulSoup
+from bs4.element import NavigableString, Tag
 import copy
 
+from format_converters import book_schema as schema
+
 if TYPE_CHECKING:
-    from format_converters import book_schema as schema
-    from format_converters.book_schema import Row, CellContent
+    from format_converters.book_schema import Row, CellContent, AnyBlock
 
 
 def _convert_rich_content_to_markup(items: List[schema.RichContentItem]) -> str:
@@ -14,20 +16,21 @@ def _convert_rich_content_to_markup(items: List[schema.RichContentItem]) -> str:
     if not items:
         return ""
     for item in items:
-        if item.type == 'text':
+        # 使用 isinstance 进行类型收窄，确保类型安全
+        if isinstance(item, schema.TextItem):
             # ToDo: 考虑是否需要对内容进行HTML转义
             parts.append(item.content)
-        elif item.type in ['bold', 'italic']:
+        elif isinstance(item, (schema.BoldItem, schema.ItalicItem)):
             tag = item.type[0]  # b or i
             parts.append(f"<{tag}>{_convert_rich_content_to_markup(item.content)}</{tag}>")
-        elif item.type == 'small':
+        elif isinstance(item, schema.SmallItem):
             parts.append(f"<small>{_convert_rich_content_to_markup(item.content)}</small>")
-        elif item.type == 'hyperlink':
+        elif isinstance(item, schema.HyperlinkItem):
             # 只翻译链接的可见文本
             parts.append(_convert_rich_content_to_markup(item.content))
-        elif item.type == 'line_break':
+        elif isinstance(item, schema.LineBreakItem):
             parts.append("<br/>")
-        elif item.type == 'note_reference':
+        elif isinstance(item, schema.NoteReferenceItem):
             # 脚注引用标记，如 "[1]"，应保持原样
             parts.append(item.marker)
     return "".join(parts)
@@ -86,7 +89,6 @@ def extract_translatable_blocks(book: schema.Book) -> List[Dict]:
     """
     tasks = []
     # 延迟导入以避免循环依赖
-    from format_converters import book_schema as schema
 
     for chapter in book.chapters:
         # 为章节标题创建翻译任务
@@ -99,23 +101,22 @@ def extract_translatable_blocks(book: schema.Book) -> List[Dict]:
 
         # TODO: 在此处添加逻辑，以根据章节标题或epub_type跳过翻译
         for block in chapter.content:
-            block_type = block.type
-            
-            if block_type == 'heading' and block.content_source:
+            # 使用 isinstance 进行类型收窄，确保安全地访问属性
+            if isinstance(block, schema.HeadingBlock) and block.content_source:
                 tasks.append({
                     "id": block.id,
-                    "type": block_type,
+                    "type": block.type,
                     "text_with_markup": block.content_source.strip()
                 })
-            elif block_type == 'paragraph' and block.content_rich_source:
+            elif isinstance(block, schema.ParagraphBlock) and block.content_rich_source:
                 text_with_markup = _convert_rich_content_to_markup(block.content_rich_source)
                 if text_with_markup:
                     tasks.append({
                         "id": block.id,
-                        "type": block_type,
+                        "type": block.type,
                         "text_with_markup": text_with_markup.strip()
                     })
-            elif block_type == 'list' and block.items_source:
+            elif isinstance(block, schema.ListBlock) and block.items_source:
                 # 拆分列表块：为每个列表项创建一个独立的翻译任务
                 for i, item in enumerate(block.items_source):
                     # 处理当前列表项的内容
@@ -137,30 +138,32 @@ def extract_translatable_blocks(book: schema.Book) -> List[Dict]:
                             # 目前我们暂时不将嵌套列表作为独立的可翻译单元，因为它已被其父列表的逻辑包含
                             # 如果需要对嵌套列表本身进行操作，需要设计更复杂的ID和写回机制
                             pass
-            elif block_type == 'table':
+            elif isinstance(block, schema.TableBlock):
                 # 表格处理：将每个单元格拆分为一个任务
-                for r_idx, row in enumerate(block.content_source.headers):
-                    for c_idx, cell in enumerate(row):
+                # 修正表头处理逻辑
+                if block.content_source.headers:
+                    for c_idx, cell in enumerate(block.content_source.headers):
                         cell_markup = _convert_rich_content_to_markup(cell)
                         if cell_markup:
                             tasks.append({
-                                "id": f"{block.id}::header::{r_idx}::{c_idx}",
+                                "id": f"{block.id}::header::{0}::{c_idx}", # 假设只有一个表头行
                                 "type": "table_cell",
                                 "text_with_markup": cell_markup.strip()
                             })
-                for r_idx, row in enumerate(block.content_source.rows):
-                    for c_idx, cell in enumerate(row):
-                        cell_markup = _convert_rich_content_to_markup(cell)
-                        if cell_markup:
-                            tasks.append({
-                                "id": f"{block.id}::row::{r_idx}::{c_idx}",
-                                "type": "table_cell",
-                                "text_with_markup": cell_markup.strip()
-                            })
-            elif block_type == 'image' and block.content_source:
+                if block.content_source.rows:
+                    for r_idx, row in enumerate(block.content_source.rows):
+                        for c_idx, cell in enumerate(row):
+                            cell_markup = _convert_rich_content_to_markup(cell)
+                            if cell_markup:
+                                tasks.append({
+                                    "id": f"{block.id}::row::{r_idx}::{c_idx}",
+                                    "type": "table_cell",
+                                    "text_with_markup": cell_markup.strip()
+                                })
+            elif isinstance(block, schema.ImageBlock) and block.content_source:
                 tasks.append({
                     "id": block.id,
-                    "type": block_type,
+                    "type": block.type,
                     "text_with_markup": block.content_source.strip()
                 })
 
@@ -176,11 +179,14 @@ def _convert_markup_to_rich_content(markup: str) -> List[schema.RichContentItem]
     这是 _convert_rich_content_to_markup 的逆向操作。
     """
     # 延迟导入以避免循环依赖
-    from format_converters import book_schema as schema
     
     # 使用 'html.parser' 并将整个标记包裹在 body 中，以获得更一致的解析行为
     soup = BeautifulSoup(f"<body>{markup}</body>", 'html.parser')
     items = []
+    
+    # soup.body 可能为 None，进行检查
+    if not soup.body:
+        return items
 
     # 遍历 body 标签下的所有直接子节点
     for element in soup.body.children:
@@ -214,34 +220,36 @@ def _convert_markup_to_rich_content(markup: str) -> List[schema.RichContentItem]
 
 def _rebuild_list_from_markup(markup: str) -> List[schema.ListItem]:
     """将包含<ul>/<ol>和<li>标记的字符串解析回 ListItem 对象列表。"""
-    from format_converters import book_schema as schema
     
     soup = BeautifulSoup(markup, 'html.parser')
     list_items = []
 
     # 找到最外层的列表标签 (ul 或 ol)
     list_tag = soup.find(['ul', 'ol'])
-    if not list_tag:
+    if not isinstance(list_tag, Tag):
         return []
 
     # 遍历所有直接的 li 子节点
-    for li in list_tag.find_all('li', recursive=False):
+    for li_element in list_tag.find_all('li', recursive=False):
+        if not isinstance(li_element, Tag):
+            continue
+        
         # 提取 li 中的嵌套列表（如果有的话）
-        nested_list_tag = li.find(['ul', 'ol'])
+        nested_list_tag = li_element.find(['ul', 'ol'])
         nested_list_items = None
-        if nested_list_tag:
+        if isinstance(nested_list_tag, Tag):
             # 在解析内容前，先将嵌套列表从 li 中移除，避免重复处理
             nested_list_markup = str(nested_list_tag.extract())
             nested_list_items = _rebuild_list_from_markup(nested_list_markup)
             
         # 解析 li 标签内剩余的内容（已排除嵌套列表）
-        content_items = _convert_markup_to_rich_content(li.decode_contents())
+        content_items = _convert_markup_to_rich_content(li_element.decode_contents())
         
         list_items.append(schema.ListItem(
             content=content_items,
             nested_list=schema.ListBlock(
                 id="nested-list", # ID 在此场景下不重要
-                ordered=nested_list_tag.name == 'ol' if nested_list_tag else False,
+                ordered=nested_list_tag.name == 'ol' if isinstance(nested_list_tag, Tag) else False,
                 items_source=nested_list_items or []
             ) if nested_list_items else None
         ))
@@ -249,7 +257,6 @@ def _rebuild_list_from_markup(markup: str) -> List[schema.ListItem]:
 
 def _rebuild_table_from_markup(markup: str) -> schema.TableContent:
     """将包含<table>标记的字符串解析回 TableContent 对象。"""
-    from format_converters import book_schema as schema
 
     soup = BeautifulSoup(markup, 'html.parser')
     headers: List[Row] = []
@@ -257,24 +264,31 @@ def _rebuild_table_from_markup(markup: str) -> schema.TableContent:
 
     # 解析表头
     thead = soup.find('thead')
-    if thead:
-        header_row = thead.find('tr')
-        if header_row:
-            header_cells: CellContent = []
-            for th in header_row.find_all('th'):
-                header_cells.append(_convert_markup_to_rich_content(th.decode_contents()))
-            headers.append(header_cells)
+    if isinstance(thead, Tag):
+        header_row_tag = thead.find('tr')
+        if isinstance(header_row_tag, Tag):
+            header_cells: Row = [] # A Row is a List[CellContent]
+            for th in header_row_tag.find_all('th'):
+                if isinstance(th, Tag):
+                    header_cells.append(_convert_markup_to_rich_content(th.decode_contents()))
+            if header_cells:
+                 headers.append(header_cells)
     
     # 解析表体
     tbody = soup.find('tbody')
-    if tbody:
+    if isinstance(tbody, Tag):
         for tr in tbody.find_all('tr'):
-            row_cells: CellContent = []
+            if not isinstance(tr, Tag): continue
+            row_cells: Row = [] # A Row is List[CellContent]
             for td in tr.find_all('td'):
-                row_cells.append(_convert_markup_to_rich_content(td.decode_contents()))
+                if isinstance(td, Tag):
+                    row_cells.append(_convert_markup_to_rich_content(td.decode_contents()))
             rows.append(row_cells)
             
-    return schema.TableContent(headers=headers[0] if headers else [], rows=rows)
+    # 根据 TableContent 定义，headers 是 Row (List[CellContent])，而不是 List[Row]
+    # 因此我们只取第一个（也是唯一一个）header row
+    final_headers: Row = headers[0] if headers else []
+    return schema.TableContent(headers=final_headers, rows=rows)
 
 def update_book_with_translations(book: schema.Book, translated_blocks: List[Dict]):
     """
@@ -282,7 +296,6 @@ def update_book_with_translations(book: schema.Book, translated_blocks: List[Dic
     此函数能处理复合ID，将翻译结果精确写回到列表项或表格单元格。
     """
     # 延迟导入以避免循环依赖
-    from format_converters import book_schema as schema
 
     # 1. 创建一个从 ID到块对象和章节对象的快速查找映射
     block_map = {block.id: block for chapter in book.chapters for block in chapter.content}
@@ -317,14 +330,14 @@ def update_book_with_translations(book: schema.Book, translated_blocks: List[Dic
             continue
         
         # 3. 根据ID结构和块类型，调用相应的更新逻辑
+        # 使用 isinstance 进行类型收窄
         if len(id_parts) == 1:
             # --- 处理简单块 (非列表、非表格) ---
-            block_type = target_block.type
-            if block_type == 'heading':
+            if isinstance(target_block, schema.HeadingBlock):
                 target_block.content_target = translated_markup
-            elif block_type == 'image':
+            elif isinstance(target_block, schema.ImageBlock):
                 target_block.content_target = translated_markup
-            elif block_type == 'paragraph':
+            elif isinstance(target_block, schema.ParagraphBlock):
                 target_block.content_rich_target = _convert_markup_to_rich_content(translated_markup)
         
         elif id_parts[1] == 'item' and isinstance(target_block, schema.ListBlock):
@@ -354,16 +367,16 @@ def update_book_with_translations(book: schema.Book, translated_blocks: List[Dic
                 
                 # 确保目标表格有结构
                 if not target_block.content_target or (not target_block.content_target.headers and not target_block.content_target.rows):
+                    # 深拷贝并清空内容
                     target_block.content_target = copy.deepcopy(target_block.content_source)
-                    # 清空内容，准备填充翻译
-                    for r in target_block.content_target.headers:
-                        for c_idx in range(len(r)): r[c_idx] = []
-                    for r in target_block.content_target.rows:
-                        for c_idx in range(len(r)): r[c_idx] = []
+                    if target_block.content_target:
+                        # Create empty shells matching the source structure
+                        target_block.content_target.headers = [[] for _ in target_block.content_target.headers]
+                        target_block.content_target.rows = [[[] for _ in cell_row] for cell_row in target_block.content_target.rows]
 
-                if id_parts[1] == 'header':
-                    target_block.content_target.headers[row_index][col_index] = _convert_markup_to_rich_content(translated_markup)
-                else: # row
+                if id_parts[1] == 'header' and target_block.content_target:
+                    target_block.content_target.headers[col_index] = _convert_markup_to_rich_content(translated_markup)
+                elif target_block.content_target: # row
                     target_block.content_target.rows[row_index][col_index] = _convert_markup_to_rich_content(translated_markup)
 
             except (ValueError, IndexError):

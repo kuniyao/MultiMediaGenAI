@@ -44,7 +44,7 @@ def _setup_environment(args):
     file_path = Path(args.file_path)
     if not file_path.is_file():
         task_logger.error(f"Error: File not found at {file_path}")
-        return None, None, None
+        return None, output_dir, task_logger
 
     return file_path, output_dir, task_logger
 

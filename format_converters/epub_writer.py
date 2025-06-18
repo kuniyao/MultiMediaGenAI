@@ -113,17 +113,18 @@ class EpubWriter:
             
             # 将内容块转换为HTML并添加到body中
             body = soup.find('body')
-            for block in chapter.content:
-                html_element = self._map_block_to_html(block, soup)
-                if html_element:
-                    body.append(html_element)
+            if isinstance(body, Tag):
+                for block in chapter.content:
+                    html_element = self._map_block_to_html(block, soup)
+                    if html_element:
+                        body.append(html_element)
 
             # 将soup对象写入文件
             # chapter.id 现在就是文件名，例如 "text/part0001.html"
             # 我们只需要取其文件名部分
             file_name = pathlib.Path(chapter.id).name
             chapter_path = self.text_dir / file_name
-            chapter_path.write_text(soup.prettify(), encoding='utf-8')
+            chapter_path.write_text(str(soup.prettify()), encoding='utf-8')
 
     def _create_xhtml_soup(self, chapter: Chapter) -> BeautifulSoup:
         """创建一个标准XHTML文件的BeautifulSoup骨架。"""
@@ -139,6 +140,9 @@ class EpubWriter:
         )
 
         head = soup.find('head')
+        if not isinstance(head, Tag):
+             # 如果 head 找不到，这是一个严重错误，但至少我们不会在 None 上崩溃
+            return soup
         
         # 添加标题
         if chapter.title:
@@ -171,23 +175,22 @@ class EpubWriter:
     def _map_block_to_html(self, block: AnyBlock, soup: BeautifulSoup) -> Optional[Tag]:
         """将一个AnyBlock对象转换为BeautifulSoup的Tag对象。作为分发器。"""
         
-        block_type = block.type
-        
-        if block_type == "heading":
+        # 使用 isinstance 进行类型收窄，确保类型安全
+        if isinstance(block, HeadingBlock):
             return self._map_heading_to_html(block, soup)
-        elif block_type == "paragraph":
+        elif isinstance(block, ParagraphBlock):
             return self._map_paragraph_to_html(block, soup)
-        elif block_type == "image":
+        elif isinstance(block, ImageBlock):
             return self._map_image_to_html(block, soup)
-        elif block_type == "list":
+        elif isinstance(block, ListBlock):
             return self._map_list_to_html(block, soup)
-        elif block_type == "table":
+        elif isinstance(block, TableBlock):
             return self._map_table_to_html(block, soup)
-        elif block_type == "code_block":
+        elif isinstance(block, CodeBlock):
             return self._map_code_block_to_html(block, soup)
-        elif block_type == "marker":
+        elif isinstance(block, MarkerBlock):
             return self._map_marker_to_html(block, soup)
-        elif block_type == "note_content":
+        elif isinstance(block, NoteContentBlock):
             return self._map_note_content_to_html(block, soup)
         
         return None
@@ -371,33 +374,33 @@ class EpubWriter:
     def _map_rich_content_to_html(self, parent_tag: Tag, rich_content: List[RichContentItem], soup: BeautifulSoup):
         """将 RichContentItem 列表转换为HTML并追加到父标签中。"""
         for item in rich_content:
-            item_type = item.type
-            if item_type == "text":
+            # 使用 isinstance 进行类型收窄
+            if isinstance(item, TextItem):
                 parent_tag.append(item.content)
-            elif item_type == "bold":
+            elif isinstance(item, BoldItem):
                 b_tag = soup.new_tag("b")
                 self._map_rich_content_to_html(b_tag, item.content, soup)
                 parent_tag.append(b_tag)
-            elif item_type == "italic":
+            elif isinstance(item, ItalicItem):
                 i_tag = soup.new_tag("i")
                 self._map_rich_content_to_html(i_tag, item.content, soup)
                 parent_tag.append(i_tag)
-            elif item_type == "hyperlink":
+            elif isinstance(item, HyperlinkItem):
                 a_tag = soup.new_tag("a", href=item.href)
                 if item.title:
                     a_tag['title'] = item.title
                 self._map_rich_content_to_html(a_tag, item.content, soup)
                 parent_tag.append(a_tag)
-            elif item_type == "line_break":
+            elif isinstance(item, LineBreakItem):
                 br_tag = soup.new_tag("br")
                 parent_tag.append(br_tag)
-            elif item_type == "note_reference":
+            elif isinstance(item, NoteReferenceItem):
                 # 将脚注引用转换为一个指向脚注内容的链接
                 a_tag = soup.new_tag("a", href=f"#{item.note_id}")
                 a_tag['epub:type'] = 'noteref'
                 a_tag.string = item.marker # 显示的引用标记，如 [1]
                 parent_tag.append(a_tag)
-            elif item_type == "small":
+            elif isinstance(item, SmallItem):
                 small_tag = soup.new_tag("small")
                 self._map_rich_content_to_html(small_tag, item.content, soup)
                 parent_tag.append(small_tag)
@@ -426,13 +429,18 @@ class EpubWriter:
             'xml'
         )
         package = soup.find('package')
+        if not isinstance(package, Tag): return
 
         # --- 1. 元数据 (Metadata) ---
         metadata = soup.new_tag('metadata')
-        metadata.append(soup.new_tag('dc:title'))
-        metadata.find('dc:title').string = self.book.metadata.title_source
-        metadata.append(soup.new_tag('dc:language'))
-        metadata.find('dc:language').string = self.book.metadata.language_source
+        
+        dc_title = soup.new_tag('dc:title')
+        dc_title.string = self.book.metadata.title_source
+        metadata.append(dc_title)
+        
+        dc_lang = soup.new_tag('dc:language')
+        dc_lang.string = self.book.metadata.language_source
+        metadata.append(dc_lang)
         
         # 添加作者
         for author in self.book.metadata.author_source:
@@ -504,34 +512,38 @@ class EpubWriter:
 
         # 写入文件
         opf_path = self.oebps_dir / 'content.opf'
-        opf_path.write_text(soup.prettify(), encoding='utf-8')
+        opf_path.write_text(str(soup.prettify()), encoding='utf-8')
 
     def _write_nav_file(self):
         """生成 nav.xhtml 导航文件。"""
         print("  - 写入 nav.xhtml 文件...")
         
         soup = self._create_xhtml_soup(Chapter(id='nav.xhtml', title='Table of Contents', content=[]))
+        body = soup.find('body')
         
-        nav = soup.new_tag('nav', attrs={'epub:type': 'toc'})
-        nav.append(soup.new_tag('h1'))
-        nav.find('h1').string = "Table of Contents"
-        
-        ol = soup.new_tag('ol')
-        for chapter in self.book.chapters:
-            if chapter.title:
-                li = soup.new_tag('li')
-                chapter_name = pathlib.Path(chapter.id).name
-                a = soup.new_tag('a', href=f"text/{chapter_name}")
-                # 优先使用翻译后的章节标题
-                a.string = chapter.title_target if chapter.title_target else chapter.title
-                li.append(a)
-                ol.append(li)
-        
-        nav.append(ol)
-        soup.find('body').append(nav)
+        if isinstance(body, Tag):
+            nav = soup.new_tag('nav', attrs={'epub:type': 'toc'})
+            
+            h1 = soup.new_tag('h1')
+            h1.string = "Table of Contents"
+            nav.append(h1)
+            
+            ol = soup.new_tag('ol')
+            for chapter in self.book.chapters:
+                if chapter.title:
+                    li = soup.new_tag('li')
+                    chapter_name = pathlib.Path(chapter.id).name
+                    a = soup.new_tag('a', href=f"text/{chapter_name}")
+                    # 优先使用翻译后的章节标题
+                    a.string = chapter.title_target if chapter.title_target else chapter.title
+                    li.append(a)
+                    ol.append(li)
+            
+            nav.append(ol)
+            body.append(nav)
 
         nav_path = self.oebps_dir / 'nav.xhtml'
-        nav_path.write_text(soup.prettify(), encoding='utf-8')
+        nav_path.write_text(str(soup.prettify()), encoding='utf-8')
 
     def _package_epub(self):
         """将构建目录中的所有内容打包成 .epub 文件。"""

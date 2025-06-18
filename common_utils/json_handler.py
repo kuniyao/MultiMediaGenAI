@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 from format_converters import format_time # Assuming this is accessible
 
 def create_pre_translate_json_objects(processed_segments, video_id, original_lang, source_type, logger=None):
@@ -113,4 +114,4 @@ def load_json_objects_from_jsonl(input_filepath, logger=None):
         return []
 
 # Need to ensure os is imported if os.makedirs is used
-import os 
+# import os

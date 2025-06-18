@@ -52,8 +52,10 @@ def construct_prompt_for_batch(segments_list_for_payload, src_lang, tgt_lang, ou
     ) 
 
 def build_translation_prompt(system_prompt: str, user_prompt: str, task_list_json: str) -> List[Dict[str, str]]:
-    pass
-    # ... (existing function)
+    return [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": f"{user_prompt}\n\n{task_list_json}"},
+    ]
 
 def build_book_translation_prompt(
     book_title: str,

@@ -64,15 +64,21 @@ def _setup_environment_and_logging(args):
     """Sets up the environment, including directories, logging, and initial variables."""
     # --- Video and Path Setup ---
     video_id = get_video_id(args.video_url_or_id)
-    video_title = get_youtube_video_title(args.video_url_or_id, logger=None) # Initial fetch without logger
+    
+    # --- Logger Setup (early, so we can use it for title fetching) ---
+    # We create a preliminary logger here to capture early setup messages.
+    # It will be replaced by the more specific task_logger later.
+    temp_logger = logging.getLogger('TempSetup')
+    
+    video_title = get_youtube_video_title(args.video_url_or_id, logger=temp_logger) # Use a temp logger for the first fetch
     
     sanitized_title = sanitize_filename(video_title)
-    specific_output_dir_name = sanitized_title if sanitized_title != video_id else video_id
+    specific_output_dir_name = sanitized_title if sanitized_title and sanitized_title != video_id else video_id
     
     video_output_path = os.path.join(args.output_dir, specific_output_dir_name)
     os.makedirs(video_output_path, exist_ok=True)
 
-    # --- Logger Setup ---
+    # --- Full Logger Setup ---
     log_file_name_base = sanitized_title if sanitized_title and sanitized_title != video_id else video_id
     timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_file_name = f"{sanitize_filename(log_file_name_base)}_{timestamp_str}.log"
