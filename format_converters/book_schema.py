@@ -204,6 +204,7 @@ class CSSResource(BaseModel):
 class Chapter(BaseModel):
     id: str
     title: Optional[str] = None
+    title_target: str = ""
     epub_type: Optional[str] = None # 存储章节的语义类型 (e.g., 'toc', 'bodymatter')
     internal_css: Optional[str] = None # 存储章节内的<style>块内容
     content: List[AnyBlock]

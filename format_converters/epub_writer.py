@@ -143,7 +143,8 @@ class EpubWriter:
         # 添加标题
         if chapter.title:
             title_tag = soup.new_tag('title')
-            title_tag.string = chapter.title
+            # 优先使用翻译后的标题
+            title_tag.string = chapter.title_target if chapter.title_target else chapter.title
             head.append(title_tag)
 
         # 链接外部CSS文件
@@ -521,7 +522,8 @@ class EpubWriter:
                 li = soup.new_tag('li')
                 chapter_name = pathlib.Path(chapter.id).name
                 a = soup.new_tag('a', href=f"text/{chapter_name}")
-                a.string = chapter.title
+                # 优先使用翻译后的章节标题
+                a.string = chapter.title_target if chapter.title_target else chapter.title
                 li.append(a)
                 ol.append(li)
         

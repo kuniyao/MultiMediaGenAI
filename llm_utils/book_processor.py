@@ -89,6 +89,14 @@ def extract_translatable_blocks(book: schema.Book) -> List[Dict]:
     from format_converters import book_schema as schema
 
     for chapter in book.chapters:
+        # 为章节标题创建翻译任务
+        if chapter.title and chapter.title.strip():
+            tasks.append({
+                "id": f"chapter::{chapter.id}::title",
+                "type": "heading", # 将标题视为一种特殊的标题块
+                "text_with_markup": chapter.title.strip()
+            })
+
         # TODO: 在此处添加逻辑，以根据章节标题或epub_type跳过翻译
         for block in chapter.content:
             block_type = block.type
@@ -276,8 +284,9 @@ def update_book_with_translations(book: schema.Book, translated_blocks: List[Dic
     # 延迟导入以避免循环依赖
     from format_converters import book_schema as schema
 
-    # 1. 创建一个从 ID到块对象的快速查找映射
+    # 1. 创建一个从 ID到块对象和章节对象的快速查找映射
     block_map = {block.id: block for chapter in book.chapters for block in chapter.content}
+    chapter_map = {chapter.id: chapter for chapter in book.chapters}
 
     # 2. 遍历翻译后的块
     for item in translated_blocks:
@@ -289,6 +298,17 @@ def update_book_with_translations(book: schema.Book, translated_blocks: List[Dic
 
         # 解析复合ID
         id_parts = composite_id.split('::')
+
+        # --- 处理章节标题 ---
+        if len(id_parts) == 3 and id_parts[0] == 'chapter' and id_parts[2] == 'title':
+            chapter_id = id_parts[1]
+            target_chapter = chapter_map.get(chapter_id)
+            if target_chapter:
+                target_chapter.title_target = translated_markup
+            else:
+                print(f"警告: 在Book对象中未找到ID为 '{chapter_id}' 的章节，无法更新标题。")
+            continue # 处理完标题后继续下一个
+        
         block_id = id_parts[0]
 
         target_block = block_map.get(block_id)
