@@ -11,7 +11,7 @@ if project_root not in sys.path:
 
 from format_converters.epub_parser import epub_to_book
 from format_converters.epub_writer import book_to_epub
-from llm_utils.book_processor import extract_translatable_blocks, update_book_with_translations
+from llm_utils.book_processor import extract_translatable_chapters, update_book_with_translated_html
 from llm_utils.translator import execute_translation # 使用封装好的高级函数
 
 # 配置日志
@@ -42,28 +42,40 @@ def main():
         return
     logger.info("解析完成。")
 
-    # --- 2. 提取可翻译内容 ---
-    logger.info("正在提取可翻译内容...")
-    translatable_blocks = extract_translatable_blocks(book)
-    if not translatable_blocks:
-        logger.info("在此EPUB中未找到可翻译的内容。工作流终止。")
+    # --- 2. 提取可翻译章节 (新) ---
+    logger.info("正在提取可翻译章节...")
+    translatable_chapters = extract_translatable_chapters(book, logger=logger)
+    if not translatable_chapters:
+        logger.info("在此EPUB中未找到可翻译的章节。工作流终止。")
         return
-    logger.info(f"提取了 {len(translatable_blocks)} 个可翻译的块。")
+    logger.info(f"提取了 {len(translatable_chapters)} 个可翻译的章节任务。")
 
-    # --- 3. 准备翻译任务 ---
-    # 将我们的块格式转换为 `execute_translation` 期望的格式。
-    # `llm_processing_id` 必须是唯一的，我们用 `id`。
-    # `text_to_translate` 是要翻译的内容。
-    # `source_data` 是原始块，以便之后能恢复所有信息。
+    # --- 3. 准备翻译任务 (新) ---
+    logger.info("已将章节任务转换为翻译器所需的格式。")
     tasks_for_translator = [
         {
-            "llm_processing_id": block["id"],
-            "text_to_translate": block["text_with_markup"],
-            "source_data": block
+            "llm_processing_id": chapter_task["id"],
+            "text_to_translate": chapter_task["text_to_translate"],
+            "source_data": chapter_task["source_data"]
         }
-        for block in translatable_blocks
+        for chapter_task in translatable_chapters
     ]
-    logger.info("已将块转换为翻译器所需的任务格式。")
+
+    logger.info("--- 测试模式：仅选择前3个任务进行翻译 ---")
+    tasks_for_translator = tasks_for_translator[:4]
+
+    # --- 步骤二验证信息 ---
+    print("\n--- 步骤二验证信息 ---")
+    print(f"生成的总任务数: {len(tasks_for_translator)}")
+    if tasks_for_translator:
+        first_task = tasks_for_translator[0]
+        print("第一个任务详情示例:")
+        print(f"  ID: {first_task['llm_processing_id']}")
+        print(f"  源数据类型: {type(first_task['source_data'])}")
+        print(f"  HTML内容 (前300字符):")
+        print(first_task['text_to_translate'][:300].strip())
+    print("--- 验证信息结束 ---\n")
+    # ----------------------
 
     # --- 4. 执行翻译 ---
     # `execute_translation` 函数在内部处理批处理、Prompt构建和API调用。
@@ -88,16 +100,8 @@ def main():
 
     logger.info(f"成功从翻译器接收到 {len(translated_results)} 个结果。")
 
-    # --- 5. 格式化结果并更新 Book 对象 ---
-    # 将翻译结果转换回 `update_book_with_translations` 期望的格式。
-    update_payload = []
-    for result in translated_results:
-        original_block = result["source_data"]
-        original_block["text_with_markup"] = result.get("translated_text", "")
-        update_payload.append(original_block)
-
-    logger.info("正在用翻译结果更新Book对象...")
-    update_book_with_translations(book, update_payload)
+    # --- 5. 使用新的更新器，将翻译结果写回Book对象 (新) ---
+    update_book_with_translated_html(book, translated_results, logger=logger)
     
     # 更新书籍元数据
     # 构建一个简单的目标标题

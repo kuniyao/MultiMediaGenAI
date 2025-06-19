@@ -2,15 +2,11 @@ from __future__ import annotations
 import pathlib
 import tempfile
 import zipfile
-import base64
-from typing import List, Optional
 from bs4 import BeautifulSoup, Tag
 
+from . import html_mapper
 from .book_schema import (
-    Book, Chapter, AnyBlock, RichContentItem, HeadingBlock, ParagraphBlock,
-    ImageBlock, ListBlock, TableBlock, TextItem, BoldItem, ItalicItem,
-    HyperlinkItem, LineBreakItem, NoteReferenceItem, CodeBlock, MarkerBlock,
-    NoteContentBlock, SmallItem
+    Book, Chapter
 )
 
 
@@ -115,7 +111,7 @@ class EpubWriter:
             body = soup.find('body')
             if isinstance(body, Tag):
                 for block in chapter.content:
-                    html_element = self._map_block_to_html(block, soup)
+                    html_element = html_mapper.map_block_to_html(block, soup)
                     if html_element:
                         body.append(html_element)
 
@@ -171,239 +167,6 @@ class EpubWriter:
             head.append(style_tag)
             
         return soup
-
-    def _map_block_to_html(self, block: AnyBlock, soup: BeautifulSoup) -> Optional[Tag]:
-        """将一个AnyBlock对象转换为BeautifulSoup的Tag对象。作为分发器。"""
-        
-        # 使用 isinstance 进行类型收窄，确保类型安全
-        if isinstance(block, HeadingBlock):
-            return self._map_heading_to_html(block, soup)
-        elif isinstance(block, ParagraphBlock):
-            return self._map_paragraph_to_html(block, soup)
-        elif isinstance(block, ImageBlock):
-            return self._map_image_to_html(block, soup)
-        elif isinstance(block, ListBlock):
-            return self._map_list_to_html(block, soup)
-        elif isinstance(block, TableBlock):
-            return self._map_table_to_html(block, soup)
-        elif isinstance(block, CodeBlock):
-            return self._map_code_block_to_html(block, soup)
-        elif isinstance(block, MarkerBlock):
-            return self._map_marker_to_html(block, soup)
-        elif isinstance(block, NoteContentBlock):
-            return self._map_note_content_to_html(block, soup)
-        
-        return None
-
-    def _add_css_classes(self, tag: Tag, block: AnyBlock):
-        """将block中的css_classes添加到tag中。"""
-        if hasattr(block, 'css_classes') and block.css_classes:
-            tag['class'] = " ".join(block.css_classes)
-
-    def _map_heading_to_html(self, block: HeadingBlock, soup: BeautifulSoup) -> Tag:
-        """将 HeadingBlock 转换为 <h1>, <h2> ... 标签。"""
-        tag = soup.new_tag(f"h{block.level}")
-        # 优先使用翻译后的目标内容
-        tag.string = block.content_target if block.content_target else block.content_source
-        self._add_css_classes(tag, block)
-        return tag
-
-    def _map_paragraph_to_html(self, block: ParagraphBlock, soup: BeautifulSoup) -> Tag:
-        """将 ParagraphBlock 转换为 <p> 标签，并处理其内部的富文本。"""
-        p_tag = soup.new_tag("p")
-        self._add_css_classes(p_tag, block)
-        # 优先使用翻译后的目标富文本内容
-        content_to_map = block.content_rich_target if block.content_rich_target else block.content_rich_source
-        self._map_rich_content_to_html(p_tag, content_to_map, soup)
-        return p_tag
-
-    def _map_image_to_html(self, block: ImageBlock, soup: BeautifulSoup) -> Tag:
-        """将 ImageBlock 转换为 <img> 标签，可能包含在一个容器内。"""
-        # 计算图片的相对路径，使用扁平化的文件名
-        file_name = pathlib.Path(block.path).name
-        relative_path = f"../images/{file_name}"
-        
-        # 优先使用翻译后的图片描述作为 alt 文本
-        alt_text = block.content_target if block.content_target else block.content_source
-        img_tag = soup.new_tag("img", src=relative_path, alt=alt_text)
-        if block.img_css_classes:
-            img_tag['class'] = " ".join(block.img_css_classes)
-
-        # 如果指定了容器标签 (e.g., 'p')，则将图片包裹起来
-        if block.container_tag:
-            container_tag = soup.new_tag(block.container_tag)
-            self._add_css_classes(container_tag, block) # css_classes 应用于容器
-            container_tag.append(img_tag)
-            return container_tag
-        else:
-            # 如果没有容器，img_css_classes 已经应用于 img_tag，
-            # 现在将 block 的 css_classes (通常用于容器)也应用于 img_tag
-            self._add_css_classes(img_tag, block)
-            return img_tag
-
-    def _map_list_to_html(self, block: ListBlock, soup: BeautifulSoup) -> Tag:
-        """将 ListBlock 转换为 <ul> 或 <ol> 标签，并递归处理其项目。"""
-        list_tag_name = "ol" if block.ordered else "ul"
-        list_tag = soup.new_tag(list_tag_name)
-
-        items_to_map = block.items_target if block.items_target else block.items_source
-
-        # 检查是否为由<p>标签转换而来的伪列表
-        is_pseudo_list = False
-        final_classes = block.css_classes
-        # 检查标记class
-        if final_classes and 'pseudo-list-marker' in final_classes:
-            is_pseudo_list = True
-            # 创建一个不包含我们内部标记的新列表
-            final_classes = [c for c in final_classes if c != 'pseudo-list-marker']
-
-        # 应用清理后的class
-        if final_classes:
-            list_tag['class'] = " ".join(final_classes)
-
-        for item in items_to_map:
-            li_tag = soup.new_tag("li")
-            self._map_rich_content_to_html(li_tag, item.content, soup)
-            
-            # 处理嵌套列表
-            if item.nested_list:
-                nested_list_tag = self._map_list_to_html(item.nested_list, soup)
-                if nested_list_tag:
-                    li_tag.append(nested_list_tag)
-            
-            if is_pseudo_list:
-                # 对于伪列表的<li>标签，添加一个特定的类名以应用CSS ::before 伪元素
-                li_tag['class'] = 'pseudo-list-item'
-            
-            list_tag.append(li_tag)
-        return list_tag
-
-    def _map_table_to_html(self, block: TableBlock, soup: BeautifulSoup) -> Tag:
-        """将 TableBlock 转换为 <table> 标签。"""
-        table_tag = soup.new_tag("table")
-        self._add_css_classes(table_tag, block)
-        
-        # 优先使用翻译后的目标表格内容
-        content_to_map = block.content_target if (block.content_target and (block.content_target.headers or block.content_target.rows)) else block.content_source
-
-        # 渲染表头
-        if content_to_map.headers:
-            thead = soup.new_tag("thead")
-            tr = soup.new_tag("tr")
-            for cell_content in content_to_map.headers:
-                th = soup.new_tag("th")
-                self._map_rich_content_to_html(th, cell_content, soup)
-                tr.append(th)
-            thead.append(tr)
-            table_tag.append(thead)
-            
-        # 渲染数据行
-        if content_to_map.rows:
-            tbody = soup.new_tag("tbody")
-            for row_data in content_to_map.rows:
-                tr = soup.new_tag("tr")
-                for cell_content in row_data:
-                    td = soup.new_tag("td")
-                    self._map_rich_content_to_html(td, cell_content, soup)
-                    tr.append(td)
-                tbody.append(tr)
-            table_tag.append(tbody)
-            
-        return table_tag
-
-    def _map_code_block_to_html(self, block: CodeBlock, soup: BeautifulSoup) -> Tag:
-        """将 CodeBlock 转换为 <pre><code>...</code></pre> 结构。"""
-        pre_tag = soup.new_tag("pre")
-        self._add_css_classes(pre_tag, block)
-        
-        code_tag = soup.new_tag("code")
-        if block.language:
-            code_tag['class'] = f"language-{block.language}"
-        
-        # 将结构化的代码行拼接为字符串，保留换行符
-        code_text = "\n".join(line.value for line in block.content_structured_source)
-        code_tag.string = code_text
-
-        pre_tag.append(code_tag)
-
-        # 优先使用翻译后的目标结构化内容
-        content_to_map = block.content_structured_target if block.content_structured_target else block.content_structured_source
-
-        # 逐行处理代码或注释
-        for line in content_to_map:
-            if line.type == "code":
-                code_tag.append(line.value)
-                code_tag.append(soup.new_tag("br"))
-            elif line.type == "comment":
-                comment_span = soup.new_tag("span", attrs={"class": "comment"})
-                comment_span.string = line.value
-                code_tag.append(comment_span)
-                code_tag.append(soup.new_tag("br"))
-        
-        return pre_tag
-
-    def _map_marker_to_html(self, block: MarkerBlock, soup: BeautifulSoup) -> Optional[Tag]:
-        """将 MarkerBlock 转换为对应的HTML标记，如 <hr/>。"""
-        if block.role == "doc-pagebreak":
-            hr_tag = soup.new_tag("hr")
-            if block.title:
-                hr_tag['title'] = block.title
-            self._add_css_classes(hr_tag, block)
-            # 在XHTML中，<hr> 可能是自闭合的，但BeautifulSoup会处理好
-            return hr_tag
-        return None
-
-    def _map_note_content_to_html(self, block: NoteContentBlock, soup: BeautifulSoup) -> Tag:
-        """将脚注/尾注内容块转换为HTML。"""
-        # 脚注/尾注容器，通常是一个 div
-        note_div = soup.new_tag("div")
-        self._add_css_classes(note_div, block)
-        note_div['id'] = block.id # 使用块的ID作为HTML元素的ID
-
-        # 优先使用翻译后的目标内容
-        content_to_map = block.content_target if block.content_target else block.content_source
-
-        # 在容器内部渲染脚注的实际内容
-        for inner_block in content_to_map:
-            html_element = self._map_block_to_html(inner_block, soup)
-            if html_element:
-                note_div.append(html_element)
-                
-        return note_div
-
-    def _map_rich_content_to_html(self, parent_tag: Tag, rich_content: List[RichContentItem], soup: BeautifulSoup):
-        """将 RichContentItem 列表转换为HTML并追加到父标签中。"""
-        for item in rich_content:
-            # 使用 isinstance 进行类型收窄
-            if isinstance(item, TextItem):
-                parent_tag.append(item.content)
-            elif isinstance(item, BoldItem):
-                b_tag = soup.new_tag("b")
-                self._map_rich_content_to_html(b_tag, item.content, soup)
-                parent_tag.append(b_tag)
-            elif isinstance(item, ItalicItem):
-                i_tag = soup.new_tag("i")
-                self._map_rich_content_to_html(i_tag, item.content, soup)
-                parent_tag.append(i_tag)
-            elif isinstance(item, HyperlinkItem):
-                a_tag = soup.new_tag("a", href=item.href)
-                if item.title:
-                    a_tag['title'] = item.title
-                self._map_rich_content_to_html(a_tag, item.content, soup)
-                parent_tag.append(a_tag)
-            elif isinstance(item, LineBreakItem):
-                br_tag = soup.new_tag("br")
-                parent_tag.append(br_tag)
-            elif isinstance(item, NoteReferenceItem):
-                # 将脚注引用转换为一个指向脚注内容的链接
-                a_tag = soup.new_tag("a", href=f"#{item.note_id}")
-                a_tag['epub:type'] = 'noteref'
-                a_tag.string = item.marker # 显示的引用标记，如 [1]
-                parent_tag.append(a_tag)
-            elif isinstance(item, SmallItem):
-                small_tag = soup.new_tag("small")
-                self._map_rich_content_to_html(small_tag, item.content, soup)
-                parent_tag.append(small_tag)
 
     def _write_container_xml(self):
         """生成 META-INF/container.xml 文件。"""

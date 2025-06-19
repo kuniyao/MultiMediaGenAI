@@ -111,3 +111,30 @@ def build_book_translation_prompt(
     ])
     
     return "\n\n".join(prompt_parts) 
+
+def build_html_translation_prompt(html_content: str, source_lang: str, target_lang: str) -> str:
+    """
+    为整个HTML文档的翻译构建一个强大的Prompt。
+    """
+    prompt = f"""
+# ROLE & GOAL
+You are an expert translator specializing in translating HTML documents from {source_lang} to {target_lang}. Your task is to translate the user-provided HTML content while perfectly preserving its structure.
+
+# CRITICAL RULES
+1.  PRESERVE ALL TAGS: You MUST keep all HTML tags (e.g., `<p>`, `<h1>`, `<i>`, `<span class="foo">`) and their attributes (`class`, `id`, `href`, etc.) completely unchanged.
+2.  TRANSLATE ONLY TEXT: Only translate the human-readable text content that appears between the HTML tags. Do not translate tag names or attribute values.
+3.  MAINTAIN STRUCTURE: The output MUST be a single, valid HTML document with the exact same structure as the input. Do not add, remove, or reorder any HTML elements.
+4.  JSON OUTPUT: You MUST respond with a single, valid JSON object containing one key: "translated_html". The value of this key should be the complete translated HTML string.
+
+# EXAMPLE
+-   INPUT HTML: `<p class="title">The <b>Quick</b> Brown Fox</p>`
+-   EXPECTED JSON OUTPUT: `{{"translated_html": "<p class=\\"title\\">敏捷的<b>棕色</b>狐狸</p>"}}`
+
+# TASK
+Now, please translate the following HTML content from {source_lang} to {target_lang}.
+
+--- START OF HTML CONTENT ---
+{html_content}
+--- END OF HTML CONTENT ---
+"""
+    return prompt 
