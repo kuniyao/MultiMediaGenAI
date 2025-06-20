@@ -61,9 +61,6 @@ def main():
         for chapter_task in translatable_chapters
     ]
 
-    logger.info("--- 测试模式：仅选择前3个任务进行翻译 ---")
-    tasks_for_translator = tasks_for_translator[:4]
-
     # --- 步骤二验证信息 ---
     print("\n--- 步骤二验证信息 ---")
     print(f"生成的总任务数: {len(tasks_for_translator)}")

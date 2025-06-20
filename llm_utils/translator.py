@@ -15,6 +15,39 @@ from .prompt_builder import build_html_translation_prompt
 project_root = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=project_root / '.env')
 
+# New, reusable function to get a configured model client
+def get_model_client(logger=None, generation_config_overrides: dict | None = None):
+    """
+    Initializes and returns a configured Gemini model client.
+    This function is now the single source of truth for model initialization.
+    It can accept overrides for the generation config.
+    """
+    logger = logger if logger else logging.getLogger(__name__)
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        logger.error("GEMINI_API_KEY not found in environment variables.")
+        return None
+    
+    try:
+        genai.configure(api_key=api_key)
+
+        # Start with default config and apply overrides
+        config_params = {"temperature": 0.0}
+        if generation_config_overrides:
+            config_params.update(generation_config_overrides)
+        
+        generation_config = genai.types.GenerationConfig(**config_params)
+        
+        model = genai.GenerativeModel(
+            config.LLM_MODEL_GEMINI,
+            generation_config=generation_config
+        )
+        logger.debug(f"Successfully initialized Gemini model client with config: {config_params}")
+        return model
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini model client: {e}", exc_info=True)
+        return None
+
 class Translator:
     """
     一个统一的类，用于处理使用Google Gemini API的翻译。
@@ -25,27 +58,17 @@ class Translator:
         self.model = self._initialize_model()
 
     def _initialize_model(self):
-        """(此函数保持不变) 初始化并配置Gemini模型。"""
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            self.logger.error("GEMINI_API_KEY not found. Translation will be skipped.")
-            return None
-        
-        try:
-            genai.configure(api_key=api_key)
-            generation_config = genai.types.GenerationConfig(
-                response_mime_type="application/json",
-                temperature=0.0
-            )
-            model = genai.GenerativeModel(
-                config.LLM_MODEL_GEMINI,
-                generation_config=generation_config
-            )
-            self.logger.debug(f"Successfully initialized Gemini model: {config.LLM_MODEL_GEMINI}.")
-            return model
-        except Exception as e:
-            self.logger.error(f"Failed to initialize Gemini model: {e}", exc_info=True)
-            return None
+        """
+        Initializes the Gemini model for JSON-based translation by requesting
+        a client with a specific response MIME type.
+        """
+        # Request a model specifically configured for JSON output.
+        json_config_overrides = {"response_mime_type": "application/json"}
+        model_client = get_model_client(
+            self.logger, 
+            generation_config_overrides=json_config_overrides
+        )
+        return model_client
 
     def _call_gemini_api_for_html(self, prompt: str, log_file_path: str | None, task_id: str) -> str | None:
         """为单个HTML翻译任务调用Gemini API，并增加健壮的错误处理。"""

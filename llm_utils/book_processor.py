@@ -1,109 +1,207 @@
 from __future__ import annotations
-from bs4 import BeautifulSoup, Tag
+from bs4 import BeautifulSoup
 from format_converters import html_mapper
 from format_converters.book_schema import Chapter, Book, AnyBlock
 from typing import List, Dict
+from llm_utils.translator import get_model_client
+import config
+
+
+def _serialize_blocks_to_html(blocks: List[AnyBlock]) -> str:
+    """Helper function to serialize a list of Block objects to an HTML string."""
+    soup = BeautifulSoup('<body></body>', 'html.parser')
+    body = soup.body
+    for block in blocks:
+        html_element = html_mapper.map_block_to_html(block, soup)
+        if html_element:
+            body.append(html_element)
+    return body.prettify(formatter="html5")
 
 
 def chapter_content_to_html(chapter: Chapter) -> str:
     """
-    【第一步核心函数】将单个Chapter对象的内容转换回其HTML内容的字符串。
+    Serializes the content of a single Chapter object back into an HTML string.
+    This function now uses the internal helper for serialization.
     """
-    # 创建一个临时的BeautifulSoup对象来构建HTML
-    soup = BeautifulSoup('<body></body>', 'html.parser')
-    body = soup.body
-
-    for block in chapter.content:
-        # 直接调用我们解耦出来的、可重用的HTML映射函数
-        html_element = html_mapper.map_block_to_html(block, soup)
-        if html_element:
-            body.append(html_element)
-    
-    # 使用prettify()可以获得格式更美观的HTML，方便调试
-    return body.prettify(formatter="html5")
+    return _serialize_blocks_to_html(chapter.content)
 
 
 def extract_translatable_chapters(book: Book, logger=None) -> list:
     """
-    从Book对象中提取所有可翻译的章节，并将其内容序列化为HTML，
-    最终生成一个以章节为单位的翻译任务列表。
+    Extracts all translatable content from the Book object and generates a list
+    of translation tasks. If a chapter's token count exceeds the configured limit,
+    it is intelligently split into multiple smaller tasks (chunks).
     """
     if logger:
-        logger.info("开始提取可翻译章节...")
-    translatable_chapters = []
+        logger.info("Initializing model client for token counting...")
+    model = get_model_client()
+    
+    # Calculate the effective target token size for a single input chunk.
+    # This accounts for the expected expansion in token count after translation.
+    effective_input_limit = config.OUTPUT_TOKEN_LIMIT / config.LANGUAGE_EXPANSION_FACTOR
+    target_token_per_chunk = effective_input_limit * config.SAFETY_MARGIN
+    
+    if logger:
+        logger.info("Starting to extract and process translatable chapters...")
+        logger.info(f"Model Output Limit: {config.OUTPUT_TOKEN_LIMIT}, Language Expansion Factor: {config.LANGUAGE_EXPANSION_FACTOR}, Safety Margin: {config.SAFETY_MARGIN}")
+        logger.info(f"Calculated effective target tokens per chunk: {int(target_token_per_chunk)}")
+        
+    translation_tasks = []
     
     for i, chapter in enumerate(book.chapters):
-        # 我们可以加入一些过滤逻辑，跳过不想翻译的章节
-        if chapter.epub_type and any(t in chapter.epub_type for t in ['toc', 'cover', 'titlepage', 'copyright']):
+        if chapter.epub_type and any(t in chapter.epub_type for t in ['toc', 'cover', 'copyright', 'titlepage']):
             if logger:
-                logger.info(f"跳过章节 {i} (ID: {chapter.id}, Title: {chapter.title})，因为其类型为: {chapter.epub_type}")
+                logger.info(f"Skipping chapter {i} (ID: {chapter.id}, Title: {chapter.title}) due to its type: {chapter.epub_type}")
             continue
 
         if not chapter.content:
             if logger:
-                logger.info(f"跳过章节 {i} (ID: {chapter.id}, Title: {chapter.title})，因为该章节没有内容。")
+                logger.info(f"Skipping chapter {i} (ID: {chapter.id}, Title: {chapter.title}) as it has no content.")
             continue
 
-        # 调用我们第一步实现的序列化函数
-        html_content = chapter_content_to_html(chapter)
-        
-        if not html_content.strip():
+        full_chapter_html = _serialize_blocks_to_html(chapter.content)
+        if not full_chapter_html.strip():
             if logger:
-                logger.info(f"跳过章节 {i} (ID: {chapter.id}, Title: {chapter.title})，因为序列化后的HTML内容为空。")
+                logger.info(f"Skipping chapter {i} (ID: {chapter.id}, Title: {chapter.title}) because its serialized HTML is empty.")
             continue
             
-        if logger:
-            logger.debug(f"成功序列化章节 {i} (ID: {chapter.id}) 为HTML。")
-        # 创建一个任务字典
-        chapter_task = {
-            "id": f"chapter::{chapter.id}",
-            "text_to_translate": html_content,
-            "source_data": chapter,  # 直接传递 Chapter 对象的引用
-        }
-        translatable_chapters.append(chapter_task)
+        try:
+            response = model.count_tokens(full_chapter_html)
+            total_tokens = response.total_tokens
+            if logger:
+                logger.info(f"Chapter {i} (ID: {chapter.id}) has an estimated {total_tokens} tokens.")
+        except Exception as e:
+            if logger:
+                logger.error(f"Could not count tokens for chapter {chapter.id}: {e}. Skipping chapter.")
+            continue
+
+        # Decision point: Split or not?
+        if total_tokens < target_token_per_chunk:
+            # Chapter is small enough, create a single task
+            task = {
+                "id": f"chapter::{chapter.id}::part_0",
+                "text_to_translate": full_chapter_html,
+                "source_data": {"id": chapter.id, "type": "chapter_part"}
+            }
+            translation_tasks.append(task)
+            if logger:
+                logger.info(f"  -> Chapter is small enough. Created one task.")
+        else:
+            # Chapter needs to be split
+            if logger:
+                logger.info(f"  -> Chapter exceeds token limit ({int(target_token_per_chunk)}). Splitting into smaller chunks...")
+            
+            part_number = 0
+            current_chunk_blocks = []
+            current_chunk_tokens = 0
+
+            for block in chapter.content:
+                block_html = _serialize_blocks_to_html([block])
+                try:
+                    block_tokens = model.count_tokens(block_html).total_tokens
+                except Exception as e:
+                    if logger:
+                        logger.warning(f"Could not count tokens for a block in {chapter.id}. Skipping block. Error: {e}")
+                    continue
+
+                if current_chunk_tokens + block_tokens > target_token_per_chunk and current_chunk_blocks:
+                    # Finalize the current chunk and create a task
+                    chunk_html = _serialize_blocks_to_html(current_chunk_blocks)
+                    task = {
+                        "id": f"chapter::{chapter.id}::part_{part_number}",
+                        "text_to_translate": chunk_html,
+                        "source_data": {"id": chapter.id, "type": "chapter_part"}
+                    }
+                    translation_tasks.append(task)
+                    if logger:
+                        logger.info(f"    - Created chunk part_{part_number} with {current_chunk_tokens} tokens.")
+                    
+                    # Reset for the next chunk
+                    part_number += 1
+                    current_chunk_blocks = []
+                    current_chunk_tokens = 0
+
+                # Add the current block to the new chunk
+                current_chunk_blocks.append(block)
+                current_chunk_tokens += block_tokens
+
+            # Create a task for the last remaining chunk
+            if current_chunk_blocks:
+                chunk_html = _serialize_blocks_to_html(current_chunk_blocks)
+                task = {
+                    "id": f"chapter::{chapter.id}::part_{part_number}",
+                    "text_to_translate": chunk_html,
+                    "source_data": {"id": chapter.id, "type": "chapter_part"}
+                }
+                translation_tasks.append(task)
+                if logger:
+                    logger.info(f"    - Created final chunk part_{part_number} with {current_chunk_tokens} tokens.")
 
     if logger:
-        logger.info(f"从 {len(book.chapters)} 个总章节中提取了 {len(translatable_chapters)} 个可翻译章节。")
+        logger.info(f"Extracted {len(translation_tasks)} translation tasks from {len(book.chapters)} chapters.")
 
-    return translatable_chapters
+    return translation_tasks
 
 
 def update_book_with_translated_html(book: Book, translated_results: List[Dict], logger):
     """
-    【核心】更新器：使用翻译后的HTML结果来更新Book对象。
+    Updates the Book object using the translated HTML results. It correctly
+    handles and reassembles chapters that were split into multiple parts.
     """
-    logger.info("开始将翻译结果写回Book对象...")
+    logger.info("Starting to update Book object with translated results...")
     
-    # 创建一个从章节ID到翻译后HTML的映射，方便查找
-    translation_map = {item['llm_processing_id']: item['translated_text'] for item in translated_results}
+    # Group translated parts by their base chapter ID
+    grouped_translations = {}
+    for result in translated_results:
+        if "[TRANSLATION_FAILED]" in result.get('translated_text', ''):
+            logger.warning(f"Translation failed for task {result.get('llm_processing_id')}. Skipping.")
+            continue
+            
+        try:
+            _, base_chapter_id, part_str = result['llm_processing_id'].split('::')
+            part_number = int(part_str.split('_')[1])
+        except (ValueError, IndexError) as e:
+            logger.warning(f"Could not parse ID '{result.get('llm_processing_id', 'N/A')}'. Skipping result. Error: {e}")
+            continue
 
-    # 遍历book中的所有章节
-    for chapter in book.chapters:
-        chapter_id_key = f"chapter::{chapter.id}"
+        if base_chapter_id not in grouped_translations:
+            grouped_translations[base_chapter_id] = []
         
-        # 检查这个章节是否在我们的翻译结果里
-        if chapter_id_key in translation_map:
-            logger.info(f"正在更新章节: {chapter.id}")
-            translated_html = translation_map[chapter_id_key]
+        grouped_translations[base_chapter_id].append(
+            (part_number, result['translated_text'])
+        )
 
-            # 检查翻译是否失败，如果失败则跳过更新
-            if "[TRANSLATION_FAILED]" in translated_html:
-                logger.warning(f"章节 {chapter.id} 的翻译失败，跳过内容更新。")
-                continue
+    # Process each chapter's grouped and translated parts
+    for chapter_id, parts in grouped_translations.items():
+        logger.info(f"Reassembling and updating chapter: {chapter_id}")
+        
+        # Sort parts by their part number to ensure correct order
+        parts.sort(key=lambda x: x[0])
+        
+        # Concatenate the HTML content of all parts
+        full_translated_html = "".join([part[1] for part in parts])
+        
+        # Find the corresponding chapter in the book
+        target_chapter = next((ch for ch in book.chapters if ch.id == chapter_id), None)
+        
+        if not target_chapter:
+            logger.warning(f"Could not find chapter with ID '{chapter_id}' in the book to update.")
+            continue
             
-            # 1. 反序列化：将翻译后的HTML重新解析为Block对象列表
-            new_blocks = html_mapper.html_to_blocks(translated_html, book.image_resources, logger)
-            
-            # 2. 更新：直接替换掉章节的content
-            chapter.content = new_blocks
-            
-            # 3. 尝试从翻译后的HTML中更新章节标题
-            soup = BeautifulSoup(translated_html, 'html.parser')
-            h_tags = soup.find(['h1', 'h2', 'h3', 'h4'])
-            if h_tags and h_tags.text:
-                new_title = h_tags.text.strip()
-                logger.info(f"  - 从H标签中提取到新标题: '{new_title}'")
-                chapter.title = new_title
-                chapter.title_target = new_title # 同时更新目标标题字段
+        # 1. Deserialize the reassembled HTML back into Block objects
+        new_blocks = html_mapper.html_to_blocks(full_translated_html, book.image_resources, logger)
+        
+        # 2. Replace the chapter's original content
+        target_chapter.content = new_blocks
+        
+        # 3. Attempt to update the chapter title from the new content
+        soup = BeautifulSoup(full_translated_html, 'html.parser')
+        h_tags = soup.find(['h1', 'h2', 'h3', 'h4'])
+        if h_tags and h_tags.text:
+            new_title = h_tags.text.strip()
+            if new_title:
+                logger.info(f"  - Updating title from H-tag to: '{new_title}'")
+                target_chapter.title = new_title
+                target_chapter.title_target = new_title
     
-    logger.info("Book对象更新完成。")
+    logger.info("Book object update process complete.")

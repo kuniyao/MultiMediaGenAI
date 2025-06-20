@@ -6,7 +6,7 @@ Configuration settings for the YouTube Translator script.
 # LLM Configuration
 LLM_PROVIDER = "gemini"  # Options: "gemini", "openai", "azure_openai", or "custom"
 # Specify the model for the selected provider
-LLM_MODEL_GEMINI = "gemini-2.5-flash-preview-05-20" # Example for Gemini
+LLM_MODEL_GEMINI = "gemini-2.5-flash-lite-preview-06-17" # Example for Gemini
 LLM_MODEL_OPENAI = "gpt-3.5-turbo" # Example for OpenAI
 LLM_MODEL_AZURE = "your-azure-deployment-name" # Example for Azure OpenAI
 
@@ -49,3 +49,18 @@ SENTENCE_END_PUNCTUATIONS = ['。', '？', '！', '.', '?', '!']
 # If a segment ends with one of these, the script will be more inclined to merge
 # it with the next segment, provided it doesn't exceed other limits.
 SUB_CLAUSE_PUNCTUATIONS = ['，', ',', '、', '；', ';', '：', ':']
+
+# === New Configurations for EPUB Chapter Splitting ===
+# The absolute maximum output tokens the model can generate in a single call.
+# This is based on the model's specification (e.g., 64k for Gemini 1.5 Flash).
+OUTPUT_TOKEN_LIMIT = 64000
+
+# A safety margin to account for unexpected variations and prompt overhead.
+# 0.9 means we'll only aim to use 90% of the available token space.
+SAFETY_MARGIN = 0.9
+
+# Estimated token expansion factor when translating from source to target language.
+# For EN -> ZH, output tokens can be ~2.0x the input tokens.
+# For other languages, this might be different (e.g., EN -> ES is closer to 1.3).
+# This is a critical parameter to prevent exceeding the model's *output* token limit.
+LANGUAGE_EXPANSION_FACTOR = 2.0
