@@ -75,11 +75,22 @@ def extract_translatable_chapters(book: Book, logger=None) -> list:
         full_chapter_html = _serialize_blocks_to_html(all_blocks)
         # ... (Token counting and splitting logic is the same) ...
         try:
-            # ... (omitted for brevity, same as before) ...
-            response = model.count_tokens(full_chapter_html)
+            if logger: logger.info(f"  -> Calling count_tokens for chapter {base_id}. HTML size: {len(full_chapter_html)} bytes.")
+            
+            # 增加 request_options 來設定 120 秒的超時時間
+            response = model.count_tokens(
+                full_chapter_html, 
+                request_options={'timeout': 120}
+            )
+
+            if logger: logger.info(f"  -> Successfully counted tokens for chapter {base_id}.")
             total_tokens = response.total_tokens
-        except:
-            total_tokens = len(full_chapter_html) // 3 # Fallback if API fails
+
+        except Exception as e: # 【重要】: 使用 "except Exception as e:" 來捕捉錯誤細節
+            # 現在 'e' 變數已定義，可以被正確日誌
+            if logger: logger.error(f"  -> Failed to count tokens for chapter {base_id}. Using fallback. Error: {e}", exc_info=True)
+            # 執行備用方案，讓程式可以繼續
+            total_tokens = len(full_chapter_html) // 3
         
         # When creating tasks, pass the marker
         task_source_data = {

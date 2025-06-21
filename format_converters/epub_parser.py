@@ -10,54 +10,58 @@ from .book_schema import (
     Book, BookMetadata, Chapter, ImageResource, CSSResource,
     AnyBlock
 )
+# 【變更 1】: 導入我們剛剛建立的“合約”
+from .base_converter import BaseInputConverter
 
 
-class EpubParser:
+# 【變更 2】: 類別改名並繼承自 BaseInputConverter
+class EpubInputConverter(BaseInputConverter):
     """
-    将EPUB文件解析并将其内容转换为基于 book_schema 的 Book 对象。
+    將EPUB文件解析並將其內容轉換為基於 book_schema 的 Book 物件。
+    這個類別現在履行 BaseInputConverter 的“合約”。
     """
 
     def __init__(self, epub_path: str):
         """
-        初始化解析器，解压EPUB文件并找到 .opf 文件。
+        初始化解析器，解壓EPUB文件並找到 .opf 文件。
         """
         self.epub_path = pathlib.Path(epub_path)
         if not self.epub_path.is_file():
             raise FileNotFoundError(f"EPUB 文件未找到: {self.epub_path}")
 
-        # 创建一个临时目录来存放解压后的文件
+        # 創建一個臨時目錄來存放解壓後的檔案
         self.temp_dir = tempfile.TemporaryDirectory()
         self.unzip_dir = pathlib.Path(self.temp_dir.name)
         self._unzip_epub()
 
-        # 定位核心的 .opf 文件路径
+        # 定位核心的 .opf 文件路徑
         self.opf_path = self._find_opf_path()
         self.content_dir = self.opf_path.parent
 
-        # 初始化一个空的 Book 对象，后续将填充内容
+        # 初始化一個空的 Book 物件，後續將填充內容
         self.book = Book(
             metadata=BookMetadata(title_source="", language_source="", language_target=""),
             chapters=[]
         )
-        # 用于存储 ID 和文件路径的映射
+        # 用於儲存 ID 和文件路徑的映射
         self.manifest_items: Dict[str, Dict] = {}
-        # 用于存储 href 和章节标题的映射
+        # 用於儲存 href 和章節標題的映射
         self.nav_map: Dict[str, str] = {}
-        # 用于存储 href 和 epub:type 的映射
+        # 用於儲存 href 和 epub:type 的映射
         self.type_map: Dict[str, str] = {}
-        # 新增：用于从 href 直接查找 manifest 条目
+        # 新增：用於從 href 直接查找 manifest 條目
         self.href_to_manifest_item: Dict[str, Dict] = {}
 
     def _unzip_epub(self):
-        """将EPUB文件解压到临时目录。"""
+        """將EPUB文件解壓到臨時目錄。"""
         with zipfile.ZipFile(self.epub_path, 'r') as zip_ref:
             zip_ref.extractall(self.unzip_dir)
-        print(f"已将EPUB解压至: {self.unzip_dir}")
+        print(f"已將EPUB解壓至: {self.unzip_dir}")
 
     def _find_opf_path(self) -> pathlib.Path:
         """
-        通过 container.xml 找到 .opf 文件的路径。
-        .opf 文件是定义书籍结构的"主文件"。
+        通過 container.xml 找到 .opf 文件的路徑。
+        .opf 文件是定義書籍結構的"主文件"。
         """
         container_xml_path = self.unzip_dir / 'META-INF' / 'container.xml'
         if not container_xml_path.exists():
@@ -68,42 +72,43 @@ class EpubParser:
 
         rootfile = soup.find('rootfile')
         if not isinstance(rootfile, Tag):
-            raise ValueError("在 container.xml 中无法找到 <rootfile> 标签。")
+            raise ValueError("在 container.xml 中無法找到 <rootfile> 標籤。")
 
         full_path_attr = rootfile.get('full-path')
         if not isinstance(full_path_attr, str):
-             raise ValueError("在 container.xml 的 <rootfile> 标签中找不到 'full-path' 属性。")
+             raise ValueError("在 container.xml 的 <rootfile> 標籤中找不到 'full-path' 屬性。")
 
         opf_path = self.unzip_dir / full_path_attr
         if not opf_path.exists():
-            raise FileNotFoundError(f"在 container.xml 指定的路径中未找到OPF文件: {opf_path}")
+            raise FileNotFoundError(f"在 container.xml 指定的路徑中未找到OPF文件: {opf_path}")
 
         return opf_path
 
-    def parse(self) -> Book:
+    # 【變更 3】: 原來的 parse() 方法被改名為 to_book()，以履行合約
+    def to_book(self) -> Book:
         """
-        执行EPUB文件解析的主方法。
+        執行EPUB文件解析的主方法。
         
         返回:
             一个代表EPUB内容的 Book 对象。
         """
-        # 第二阶段: 解析 .opf 文件，获取元数据、资源清单和阅读顺序
+        # 第二階段: 解析 .opf 文件，獲取元數據、資源清單和閱讀順序
         print("正在解析 OPF 文件...")
         self._parse_opf()
 
-        # 第三阶段: 解析每个章节文件，将HTML内容映射到我们的数据模型
-        print("正在解析章节内容...")
+        # 第三階段: 解析每個章節文件，將HTML內容映射到我們的數據模型
+        print("正在解析章節內容...")
         self._parse_chapters()
 
         print("解析完成。")
         return self.book
 
     def _parse_opf(self):
-        """解析 .opf 文件以填充元数据、资源和章节顺序。"""
+        """解析 .opf 文件以填充元數據、資源和章節順序。"""
         with open(self.opf_path, 'r', encoding='utf-8') as f:
             opf_soup = BeautifulSoup(f, 'xml')
 
-        # 1. 解析元数据 <metadata>
+        # 1. 解析元數據 <metadata>
         metadata_tag = opf_soup.find('metadata')
         if isinstance(metadata_tag, Tag):
             self.book.metadata.title_source = self._get_tag_text(metadata_tag, 'dc:title')
@@ -121,7 +126,7 @@ class EpubParser:
                 if isinstance(isbn_tag, Tag) and isbn_tag.text:
                     self.book.metadata.isbn = isbn_tag.text.strip().split(':')[-1]
         
-        # 2. 解析资源清单 <manifest>
+        # 2. 解析資源清單 <manifest>
         manifest_tag = opf_soup.find('manifest')
         cover_image_id = None
         if isinstance(metadata_tag, Tag):
@@ -140,7 +145,7 @@ class EpubParser:
                 
                 full_path = self.content_dir / href
                 if not full_path.exists():
-                    print(f"警告: 在manifest中声明的文件未找到: {full_path}")
+                    print(f"警告: 在manifest中聲明的文件未找到: {full_path}")
                     continue
 
                 self.manifest_items[item_id] = { "path": full_path, "media_type": media_type, "href": href }
@@ -158,16 +163,16 @@ class EpubParser:
                             media_type=media_type
                         )
         
-        # 创建 href 到 manifest 条目的反向映射，方便后续查找
+        # 創建 href 到 manifest 條目的反向映射，方便後續查找
         self.href_to_manifest_item = {v['href']: v for v in self.manifest_items.values() if 'href' in v}
 
-        # 4. 解析导航文件以获取章节标题和类型
+        # 4. 解析導航文件以獲取章節標題和類型
         if isinstance(manifest_tag, Tag):
             self._parse_nav(opf_soup, manifest_tag)
         else:
-            print("警告: 在 OPF 文件中未找到 <manifest> 标签，无法解析导航。")
+            print("警告: 在 OPF 文件中未找到 <manifest> 標籤，無法解析導航。")
 
-        # 3. 解析阅读顺序 <spine>
+        # 3. 解析閱讀順序 <spine>
         spine_tag = opf_soup.find('spine')
         if isinstance(spine_tag, Tag):
             for itemref in spine_tag.find_all('itemref'):
@@ -189,12 +194,12 @@ class EpubParser:
                         self.book.chapters.append(new_chapter)
 
     def _get_tag_text(self, parent_tag: Tag, tag_name: str) -> str:
-        """安全地从父标签中获取子标签的文本内容。"""
+        """安全地從父標籤中獲取子標籤的文本內容。"""
         tag = parent_tag.find(tag_name)
         return tag.text.strip() if isinstance(tag, Tag) and tag.text else ""
 
     def _get_cover_image_id(self, metadata_tag: Tag) -> Optional[str]:
-        """从元数据中找到封面图片的ID。"""
+        """從元數據中找到封面圖片的ID。"""
         cover_meta = metadata_tag.find('meta', {'name': 'cover'})
         if isinstance(cover_meta, Tag):
             content = cover_meta.get('content')
@@ -206,25 +211,25 @@ class EpubParser:
 
     def _parse_nav(self, opf_soup: BeautifulSoup, manifest_tag: Tag):
         """
-        解析导航文件 (nav.xhtml 或 toc.ncx) 来获取章节标题和语义类型。
-        此方法现在更具鲁棒性，可以处理两种常见的目录格式。
+        解析導航文件 (nav.xhtml 或 toc.ncx) 來獲取章節標題和語義類型。
+        此方法現在更具魯棒性，可以處理兩種常見的目錄格式。
         """
         nav_item = manifest_tag.find('item', {'properties': 'nav'})
         if not isinstance(nav_item, Tag):
             nav_item = manifest_tag.find('item', {'media-type': 'application/x-dtbncx+xml'})
         
         if not isinstance(nav_item, Tag):
-            print("警告: 未在 manifest 中找到导航文件 (nav.xhtml 或 toc.ncx)。")
+            print("警告: 未在 manifest 中找到導航文件 (nav.xhtml 或 toc.ncx)。")
             return
 
         nav_href = nav_item.get('href')
         if not isinstance(nav_href, str):
-            print(f"警告: 导航文件 item 缺少有效的 href 属性。")
+            print(f"警告: 導航文件 item 缺少有效的 href 屬性。")
             return
             
         nav_path = self.content_dir / nav_href
         if not nav_path.exists():
-            print(f"警告: 导航文件 '{nav_path}' 不存在。")
+            print(f"警告: 導航文件 '{nav_path}' 不存在。")
             return
         
         nav_dir = nav_path.parent
@@ -276,19 +281,19 @@ class EpubParser:
 
     def _parse_chapters(self):
         """
-        遍历所有已识别的章节，解析其HTML内容。
+        遍歷所有已識別的章節，解析其HTML內容。
         """
         for chapter in self.book.chapters:
             chapter_href = chapter.id
             if chapter_href not in self.href_to_manifest_item:
-                print(f"警告: 无法在 manifest 中找到章节 href '{chapter_href}' 对应的文件。")
+                print(f"警告: 無法在 manifest 中找到章節 href '{chapter_href}' 對應的文件。")
                 continue
 
             chapter_info = self.href_to_manifest_item[chapter_href]
             chapter_path_any = chapter_info.get("path")
 
             if not isinstance(chapter_path_any, pathlib.Path) or not chapter_path_any.exists():
-                print(f"警告: 章节文件路径无效或文件不存在: {chapter_path_any}")
+                print(f"警告: 章節文件路徑無效或文件不存在: {chapter_path_any}")
                 continue
             
             chapter_path = chapter_path_any
@@ -330,16 +335,17 @@ class EpubParser:
             chapter.content = blocks
 
     def __del__(self):
-        """在对象销毁时清理临时目录。"""
+        """在對象銷毀時清理臨時目錄。"""
         if hasattr(self, 'temp_dir'):
             self.temp_dir.cleanup()
-            print(f"已清理临时目录: {self.unzip_dir}")
+            print(f"已清理臨時目錄: {self.unzip_dir}")
 
 def epub_to_book(epub_path: str) -> Book:
     """
-    一个便捷的函数，用于将EPUB文件路径转换为 Book 对象。
+    一個便捷的函數，用於將EPUB文件路徑轉換為 Book 物件。
     """
 
-    parser = EpubParser(epub_path)
-    book = parser.parse()
+    # 【變更 4】: 這個頂層輔助函數現在使用我們新的 Converter 類別
+    converter = EpubInputConverter(epub_path)
+    book = converter.to_book()
     return book
