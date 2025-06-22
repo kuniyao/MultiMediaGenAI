@@ -52,9 +52,11 @@ def main():
 
     # --- 3. 准备翻译任务 (新) ---
     logger.info("已将章节任务转换为翻译器所需的格式。")
+
+    # 【關鍵修改】將所有 chapter_task["id"] 修改為 chapter_task["llm_processing_id"]
     tasks_for_translator = [
         {
-            "llm_processing_id": chapter_task["id"],
+            "llm_processing_id": chapter_task["llm_processing_id"], # <--- 修改此處
             "text_to_translate": chapter_task["text_to_translate"],
             "source_data": chapter_task["source_data"]
         }
@@ -62,15 +64,20 @@ def main():
     ]
 
     # --- 步骤二验证信息 ---
+    # --- 步驟二驗證信息 ---
     print("\n--- 步骤二验证信息 ---")
     print(f"生成的总任务数: {len(tasks_for_translator)}")
     if tasks_for_translator:
         first_task = tasks_for_translator[0]
         print("第一个任务详情示例:")
-        print(f"  ID: {first_task['llm_processing_id']}")
+        print(f"  ID: {first_task['llm_processing_id']}") # <--- 修改此處
         print(f"  源数据类型: {type(first_task['source_data'])}")
         print(f"  HTML内容 (前300字符):")
-        print(first_task['text_to_translate'][:300].strip())
+        # 根據任務類型決定如何顯示預覽
+        if first_task['source_data'].get('type') == 'json_batch':
+             print(first_task['text_to_translate'][:300].strip())
+        else: # split_part 的 text_to_translate 是 HTML
+             print(first_task['text_to_translate'][:300].strip())
     print("--- 验证信息结束 ---\n")
     # ----------------------
 

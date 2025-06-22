@@ -1,19 +1,12 @@
+# llm_utils/prompt_builder.py (MODIFIED FOR STEP 1)
+
 import json
 from typing import List, Dict, Optional
 
 def construct_prompt_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key, use_simplified_ids=False):
     """
     Constructs the full prompt string for a batch of segments to be translated by the LLM.
-
-    Args:
-        segments_list_for_payload (list): The list of segment objects for this batch.
-        src_lang (str): The source language code.
-        tgt_lang (str): The target language code.
-        out_text_key (str): The key to be used for the translated text in the output JSON.
-        use_simplified_ids (bool): If True, use simplified 'seg_N' IDs and instructions.
-
-    Returns:
-        str: The complete prompt string to be sent to the LLM.
+    (This function is for the YouTube workflow and remains unchanged.)
     """
     if use_simplified_ids:
         example_id_format = "seg_N (e.g., 'seg_0', 'seg_1', ... 'seg_99')"
@@ -67,19 +60,7 @@ def build_book_translation_prompt(
     glossary: Optional[Dict[str, str]] = None
 ) -> str:
     """
-    构建用于书籍章节翻译的、高度定制化的Prompt。
-
-    Args:
-        book_title: 书籍的标题.
-        source_lang: 源语言.
-        target_lang: 目标语言.
-        tone_style: 作者的语气描述 (e.g., 'academic, witty, formal').
-        writing_style: 写作风格描述 (e.g., 'concise and direct').
-        task_list_json: 包含待翻译任务的JSON字符串。
-        glossary: 可选的术语表。
-
-    Returns:
-        一个完整的、准备好发送给LLM的Prompt字符串。
+    (This function remains unchanged, useful for other potential book-related tasks.)
     """
     
     # 1. 构建Prompt的主要部分
@@ -110,11 +91,56 @@ def build_book_translation_prompt(
         "--- END OF INPUT DATA ---"
     ])
     
-    return "\n\n".join(prompt_parts) 
+    return "\n\n".join(prompt_parts)
+
+def build_json_batch_translation_prompt(json_task_string: str, source_lang: str, target_lang: str) -> str:
+    """
+    【新增函數】
+    為包含多個章節HTML的JSON批處理任務構建一個強大的Prompt。
+    """
+    # 為了示例，我們創建一個小的偽JSON，以展示結構
+    example_input = [
+        {"id": "text/part0001.html", "html_content": "<h1>Chapter 1</h1><p>This is the <b>first</b> chapter.</p>"},
+        {"id": "text/part0002.html", "html_content": "<p>A short second chapter.</p>"}
+    ]
+    example_output = [
+        {"id": "text/part0001.html", "html_content": "<h1>第一章</h1><p>这是<b>第一</b>章。</p>"},
+        {"id": "text/part0002.html", "html_content": "<p>一个简短的第二章。</p>"}
+    ]
+
+    prompt = f"""
+# ROLE & GOAL
+You are an expert translator specializing in processing structured JSON data for book translation. Your task is to translate HTML content embedded within a JSON array from {source_lang} to {target_lang}.
+
+# CRITICAL RULES
+1.  **INPUT FORMAT**: The user will provide a JSON string that represents an array of objects. Each object contains two keys: "id" (a string) and "html_content" (an HTML string).
+2.  **OUTPUT FORMAT**: Your response MUST be a single, valid JSON array. The output array MUST contain the exact same number of objects as the input array.
+3.  **ID PRESERVATION**: This is the most critical rule. For each object in your output array, the "id" field MUST be an IDENTICAL, UNCHANGED copy of the "id" from the corresponding input object. Do not alter it in any way.
+4.  **TRANSLATION**: You MUST translate the text within the "html_content" field.
+5.  **HTML TAG PRESERVATION**: You MUST preserve all HTML tags (e.g., `<h1>`, `<b>`, `<p class='foo'>`) and their attributes perfectly. Only translate the human-readable text content that appears between the HTML tags.
+
+# EXAMPLE
+-   **INPUT JSON STRING**:
+    ```json
+    {json.dumps(example_input, indent=2, ensure_ascii=False)}
+    ```
+-   **EXPECTED JSON OUTPUT (for a 'zh-CN' target)**:
+    ```json
+    {json.dumps(example_output, indent=2, ensure_ascii=False)}
+    ```
+
+# TASK
+Now, please process the following JSON data according to all the rules above. Translate the `html_content` from {source_lang} to {target_lang}.
+
+--- START OF JSON DATA ---
+{json_task_string}
+--- END OF JSON DATA ---
+"""
+    return prompt.strip()
 
 def build_html_translation_prompt(html_content: str, source_lang: str, target_lang: str) -> str:
     """
-    为整个HTML文档的翻译构建一个强大的Prompt。
+    (This function remains unchanged, useful for the 'split' chapter parts.)
     """
     prompt = f"""
 # ROLE & GOAL
@@ -137,4 +163,4 @@ Now, please translate the following HTML content from {source_lang} to {target_l
 {html_content}
 --- END OF HTML CONTENT ---
 """
-    return prompt 
+    return prompt
