@@ -7,6 +7,7 @@ from llm_utils.translator import get_model_client
 import config
 import pathlib
 import re
+import copy
 
 # --- (辅助函数，无需修改) ---
 def _get_base_chapter_id(chapter_id: str) -> str:
@@ -27,11 +28,11 @@ def _serialize_blocks_to_html(blocks: List[AnyBlock]) -> str:
 def extract_translatable_chapters(book: Book, logger=None) -> list:
     """
     (MODIFIED) Extracts tasks, injects titles into headless chapters, 
-    and MARKS them for later removal.
+    and MARKS them for later removal. It now correctly performs token counting and chunking.
     """
     if logger: logger.info("Initializing model client for token counting...")
     model = get_model_client()
-    # ... (Token计算逻辑不变) ...
+    
     effective_input_limit = config.OUTPUT_TOKEN_LIMIT / config.LANGUAGE_EXPANSION_FACTOR
     target_token_per_chunk = effective_input_limit * config.SAFETY_MARGIN
     if logger:
@@ -40,7 +41,7 @@ def extract_translatable_chapters(book: Book, logger=None) -> list:
         logger.info(f"Calculated effective target tokens per chunk: {int(target_token_per_chunk)}")
 
     translation_tasks = []
-    logical_chapters: Dict[str, List[Chapter]] = {}
+    logical_chapters: dict[str, list[Chapter]] = {}
     for chapter in book.chapters:
         base_id = _get_base_chapter_id(chapter.id)
         if base_id not in logical_chapters:
@@ -50,13 +51,11 @@ def extract_translatable_chapters(book: Book, logger=None) -> list:
     for base_id, chapter_parts in logical_chapters.items():
         first_part = chapter_parts[0]
         
-        # We process all chapters now, even metadata ones, to inject titles if needed
         all_blocks = []
         for part in chapter_parts:
             all_blocks.extend(part.content)
 
-        # (MODIFIED) TITLE INJECTION AND MARKING LOGIC
-        was_title_injected = False # Our flag/marker
+        was_title_injected = False
         has_heading = any(isinstance(block, HeadingBlock) for block in all_blocks)
 
         if not has_heading and first_part.title:
@@ -66,45 +65,36 @@ def extract_translatable_chapters(book: Book, logger=None) -> list:
                 content_source=first_part.title, content_target=""
             )
             all_blocks.insert(0, injected_heading)
-            was_title_injected = True # Set the mark!
+            was_title_injected = True
 
         if not all_blocks:
             if logger: logger.info(f"Skipping logical chapter {base_id} as it has no content.")
             continue
 
         full_chapter_html = _serialize_blocks_to_html(all_blocks)
-        # ... (Token counting and splitting logic is the same) ...
+        
+        # 【關鍵】: 確保 token 計數邏輯被執行
         try:
             if logger: logger.info(f"  -> Calling count_tokens for chapter {base_id}. HTML size: {len(full_chapter_html)} bytes.")
-            
-            # 增加 request_options 來設定 120 秒的超時時間
-            response = model.count_tokens(
-                full_chapter_html, 
-                request_options={'timeout': 120}
-            )
-
-            if logger: logger.info(f"  -> Successfully counted tokens for chapter {base_id}.")
+            response = model.count_tokens(full_chapter_html, request_options={'timeout': 120})
             total_tokens = response.total_tokens
-
-        except Exception as e: # 【重要】: 使用 "except Exception as e:" 來捕捉錯誤細節
-            # 現在 'e' 變數已定義，可以被正確日誌
+            if logger: logger.info(f"  -> Successfully counted {total_tokens} tokens for chapter {base_id}.")
+        except Exception as e:
             if logger: logger.error(f"  -> Failed to count tokens for chapter {base_id}. Using fallback. Error: {e}", exc_info=True)
-            # 執行備用方案，讓程式可以繼續
             total_tokens = len(full_chapter_html) // 3
         
-        # When creating tasks, pass the marker
         task_source_data = {
             "id": base_id, 
             "type": "chapter_part", 
-            "title_was_injected": was_title_injected # Pass the marker
+            "title_was_injected": was_title_injected
         }
-        # ... (The rest of the splitting logic creates tasks using this source_data) ...
+        
         if total_tokens < target_token_per_chunk:
             task = {"id": f"chapter::{base_id}::part_0", "text_to_translate": full_chapter_html, "source_data": task_source_data}
             translation_tasks.append(task)
         else:
-            # Split and create tasks, making sure each task gets the task_source_data
-            # ... (omitted for brevity, same as before, but ensuring source_data is passed) ...
+            # 【關鍵】: 確保分拆邏輯被執行
+            if logger: logger.info(f"  -> Chapter {base_id} with {total_tokens} tokens exceeds target of {int(target_token_per_chunk)}. Splitting into smaller chunks.")
             part_number = 0
             current_chunk_blocks = []
             current_chunk_tokens = 0
@@ -181,19 +171,19 @@ def _patch_toc_titles(book: Book, chapter_id_map: Dict[str, Chapter], logger):
                 except Exception as e:
                     logger.error(f"Error patching TOC link for href '{href}': {e}")
 
-
-# --- (update_book_with_translated_html 函数，已加入移除逻辑) ---
-def update_book_with_translated_html(book: Book, translated_results: List[Dict], logger):
+def apply_translations_to_book(original_book: Book, translated_results: list[dict], logger) -> Book:
     """
     (MODIFIED) Updates the book, extracting titles first, and then conditionally
     removing injected titles from the final body content.
     """
-    logger.info("Starting to update Book object with translated results...")
+    logger.info("Starting to create a new, translated Book object...")
     
-    # --- STAGE 1: DATA PREPARATION ---
+    # STAGE 1: DATA PREPARATION
+    import copy
+    translated_book = copy.deepcopy(original_book)
+
     grouped_translations = {}
     for result in translated_results:
-        # ... (grouping logic now includes capturing the marker) ...
         if "[TRANSLATION_FAILED]" in result.get('translated_text', ''):
             logger.warning(f"Translation failed for task {result.get('llm_processing_id')}. Skipping.")
             continue
@@ -209,13 +199,13 @@ def update_book_with_translated_html(book: Book, translated_results: List[Dict],
         except (ValueError, IndexError) as e:
             logger.warning(f"Could not parse ID '{result.get('llm_processing_id', 'N/A')}'. Skipping result. Error: {e}")
 
-    logical_chapter_map: Dict[str, Chapter] = {}
-    for ch in book.chapters:
+    logical_chapter_map: dict[str, Chapter] = {}
+    for ch in translated_book.chapters:
         base_id = _get_base_chapter_id(ch.id)
         if base_id not in logical_chapter_map:
             logical_chapter_map[base_id] = ch
 
-    # --- STAGE 2: CONTENT & TITLE POPULATION (FIRST PASS) ---
+    # STAGE 2: CONTENT & TITLE POPULATION (FIRST PASS)
     logger.info("--- Pass 1: Populating content and authoritative titles ---")
     for base_id, main_chapter_obj in logical_chapter_map.items():
         if base_id in grouped_translations:
@@ -226,9 +216,10 @@ def update_book_with_translated_html(book: Book, translated_results: List[Dict],
             parts.sort(key=lambda x: x[0])
             full_translated_html = "".join([part[1] for part in parts])
             
+            from bs4 import BeautifulSoup
+            from format_converters import html_mapper # 確保導入
             soup = BeautifulSoup(full_translated_html, 'html.parser')
             
-            # 1. First, always extract the title for metadata consistency (nav.xhtml)
             new_title = ""
             h_tag = soup.find(['h1', 'h2', 'h3', 'h4'])
             if h_tag:
@@ -242,21 +233,20 @@ def update_book_with_translated_html(book: Book, translated_results: List[Dict],
             else:
                 logger.warning(f"  - Could NOT establish authoritative title for '{base_id}'.")
 
-            # 2. (NEW) Conditionally remove the injected title from the body content
             if title_was_injected and h_tag:
                 logger.info(f"  -> Removing injected title '{new_title}' from final content of {base_id}")
-                h_tag.decompose() # Remove the tag and its contents from the soup
+                h_tag.decompose()
             
-            # 3. Update the chapter content with the (potentially modified) HTML
             final_html_content = str(soup)
-            main_chapter_obj.content = html_mapper.html_to_blocks(final_html_content, book.image_resources, logger)
+            # 【關鍵】確保 html_mapper.html_to_blocks 被正確呼叫
+            main_chapter_obj.content = html_mapper.html_to_blocks(final_html_content, translated_book.image_resources, logger)
 
-    # --- STAGE 3: CLEANUP & TOC CORRECTION (SECOND PASS) ---
-    # ... (This part is correct from the previous version, no changes needed) ...
+    # STAGE 3: CLEANUP & TOC CORRECTION (SECOND PASS)
     chapters_to_keep = list(logical_chapter_map.values())
-    book.chapters = chapters_to_keep
-    final_chapter_id_map = {_get_base_chapter_id(ch.id): ch for ch in book.chapters}
+    translated_book.chapters = chapters_to_keep
+    final_chapter_id_map = {_get_base_chapter_id(ch.id): ch for ch in translated_book.chapters}
     logger.info("--- Pass 2: Correcting ToC page titles ---")
-    _patch_toc_titles(book, final_chapter_id_map, logger)
+    _patch_toc_titles(translated_book, final_chapter_id_map, logger)
     
-    logger.info("Book object update process complete.")
+    logger.info("New translated Book object created successfully.")
+    return translated_book

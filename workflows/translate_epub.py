@@ -11,7 +11,7 @@ if project_root not in sys.path:
 
 from format_converters.epub_parser import epub_to_book
 from format_converters.epub_writer import book_to_epub
-from llm_utils.book_processor import extract_translatable_chapters, update_book_with_translated_html
+from llm_utils.book_processor import extract_translatable_chapters, apply_translations_to_book
 from llm_utils.translator import execute_translation # 使用封装好的高级函数
 
 # 配置日志
@@ -98,16 +98,22 @@ def main():
     logger.info(f"成功从翻译器接收到 {len(translated_results)} 个结果。")
 
     # --- 5. 使用新的更新器，将翻译结果写回Book对象 (新) ---
-    update_book_with_translated_html(book, translated_results, logger=logger)
+    logger.info("Applying translations to create a new Book object...")
+    translated_book = apply_translations_to_book(
+        original_book=book, # 傳入原始 book
+        translated_results=translated_results,
+        logger=logger
+    )
     
     # 更新书籍元数据
     # 构建一个简单的目标标题
-    if book.metadata.title_source:
-         title_map = {"zh-CN": "【中文翻译】", "ja": "【日本語訳】"}
+    if translated_book.metadata.title_source:
+         title_map = {"zh-CN": "【中文翻譯】", "ja": "【日本語訳】"}
          prefix = title_map.get(args.target_lang, f"[{args.target_lang}] ")
-         book.metadata.title_target = prefix + book.metadata.title_source
-    book.metadata.language_target = args.target_lang
-    logger.info("更新完成。")
+         # 【注意】修改的是 translated_book 的元數據
+         translated_book.metadata.title_target = prefix + translated_book.metadata.title_source
+    translated_book.metadata.language_target = args.target_lang
+    logger.info("Metadata updated for the new book.")
 
     # --- 6. 生成新的 EPUB 文件 ---
     # 构建输出文件名
@@ -118,11 +124,12 @@ def main():
     lang_suffix = args.target_lang.replace('-', '_')
     output_path = os.path.join(dir_name, f"{file_name}_{lang_suffix}{file_ext}")
 
-    logger.info(f"正在将更新后的 Book 对象写入新的EPUB文件: {output_path}...")
+    logger.info(f"正在將更新後的 Book 物件寫入新的EPUB文件: {output_path}...")
     try:
-        book_to_epub(book, output_path)
+        # 【注意】傳入的是全新的 translated_book
+        book_to_epub(translated_book, output_path)
     except Exception as e:
-        logger.error(f"生成新的EPUB文件时发生错误: {e}", exc_info=True)
+        logger.error(f"生成新的EPUB文件時發生錯誤: {e}", exc_info=True)
         return
         
     logger.info("\n" + "="*50)
