@@ -1,4 +1,5 @@
-# ... (imports and helper functions _get_base_chapter_id, _serialize_blocks_to_html, and extract_translatable_chapters remain the same as the last version) ...
+# llm_utils/book_processor.py (FINAL VERSION)
+
 from __future__ import annotations
 from bs4 import BeautifulSoup, Tag
 from format_converters import html_mapper
@@ -11,10 +12,13 @@ import re
 import copy
 import json
 
+# --- (輔助函數，無需修改) ---
 def _get_base_chapter_id(chapter_id: str) -> str:
+    """獲取章節的基礎ID，剝離任何 '_split_' 後綴。"""
     return chapter_id.split('_split_')[0]
 
 def _serialize_blocks_to_html(blocks: List[AnyBlock], soup: BeautifulSoup) -> str:
+    """將一個塊列表序列化為一個HTML字符串。"""
     body = soup.new_tag('body')
     for block in blocks:
         html_element = html_mapper.map_block_to_html(block, soup)
@@ -22,6 +26,7 @@ def _serialize_blocks_to_html(blocks: List[AnyBlock], soup: BeautifulSoup) -> st
             body.append(html_element)
     return ''.join(str(child) for child in body.children)
 
+# --- (提取和打包函數，無需修改) ---
 def extract_translatable_chapters(book: Book, logger=None) -> list:
     if logger: logger.info("Initializing model client for token counting...")
     model = get_model_client(logger=logger)
@@ -120,6 +125,7 @@ def extract_translatable_chapters(book: Book, logger=None) -> list:
     if logger: logger.info(f"Extracted {len(book.chapters)} chapters into {len(translation_tasks)} translation tasks.")
     return translation_tasks
 
+# --- (标题修正辅助函数，無需修改) ---
 def _patch_toc_titles(book: Book, chapter_id_map: Dict[str, Chapter], logger):
     logger.info("Starting TOC title correction post-processing step...")
     toc_chapter = None
@@ -147,45 +153,40 @@ def _patch_toc_titles(book: Book, chapter_id_map: Dict[str, Chapter], logger):
             if content_item.type == 'hyperlink':
                 href = content_item.href
                 try:
-                    # More robust path handling for cross-platform compatibility
-                    target_id_path = pathlib.Path(href.replace('\\', '/')).name.split('#')[0]
+                    target_id_path = pathlib.Path(href).name.split('#')[0]
+                    base_target_id = _get_base_chapter_id(f"text/{target_id_path}")
+                    if base_target_id not in chapter_id_map:
+                        base_target_id = _get_base_chapter_id(f"OEBPS/text/{target_id_path}")
                     
-                    # Try to find the matching chapter ID more flexibly
-                    matched_chapter = None
-                    for ch_id, ch_obj in chapter_id_map.items():
-                        if ch_id.endswith(target_id_path):
-                            matched_chapter = ch_obj
-                            break
-                    
-                    if matched_chapter and matched_chapter.title_target:
-                        authoritative_title = matched_chapter.title_target
+                    target_chapter_obj = chapter_id_map.get(base_target_id)
+                    if target_chapter_obj and target_chapter_obj.title_target:
+                        authoritative_title = target_chapter_obj.title_target
                         original_link_text = "".join(t.content for t in content_item.content if t.type == 'text')
                         match = re.match(r'^\s*([a-zA-Z0-9]+\s*)\s*', original_link_text)
                         prefix = match.group(1) if match else ""
                         new_link_text = f"{prefix}{authoritative_title}".strip()
-                        if logger: logger.info(f"  - Correcting link for '{href}' to '{new_link_text}'")
+                        if logger: logger.debug(f"  - Correcting link for '{href}' to '{new_link_text}'")
                         content_item.content = [TextItem(content=new_link_text)]
                     else:
-                        if logger: logger.warning(f"  - Could not find authoritative title for target href '{href}'.")
+                        if logger: logger.warning(f"  - Could not find authoritative title for target href '{href}' (mapped to base_id '{base_target_id}')")
                 except Exception as e:
                     if logger: logger.error(f"Error patching TOC link for href '{href}': {e}")
 
 
+# --- (核心修改：應用翻譯的最終實現) ---
 def apply_translations_to_book(original_book: Book, translated_results: list[dict], logger) -> Book:
     """
-    【最終修正版】
-    將翻譯結果應用回Book對象，包含更健壯的標題提取和錯誤處理。
+    【最終實現 - 已修正】
+    將翻譯結果（包括批處理和拆分的部分）應用回Book對象，並重建完整的翻譯書籍。
     """
     if logger: logger.info("Applying all translations to create the final Book object...")
     
+    # STAGE 1: 數據準備
     translated_book = copy.deepcopy(original_book)
     chapter_map = {ch.id: ch for ch in translated_book.chapters}
     grouped_split_parts: Dict[str, List[Dict]] = {} 
-    
-    # 用一個字典臨時存儲每個章節的翻譯後HTML，以便後續提取標題
-    translated_html_map: Dict[str, str] = {}
 
-    # STAGE 1: 解包和收集所有翻譯內容
+    # STAGE 2: 遍歷翻譯結果，解包並更新/收集內容
     for result in translated_results:
         task_id = result["llm_processing_id"]
         source_data = result["source_data"]
@@ -196,67 +197,69 @@ def apply_translations_to_book(original_book: Book, translated_results: list[dic
             logger.warning(f"Translation failed for task {task_id}. Skipping application.")
             continue
             
+        # 策略一：直接應用批處理任務 (JSON Batch)
         if task_type == 'json_batch':
             try:
+                # 【數據清洗】
                 cleaned_json_text = re.sub(r'(<a href=\\"\\\"></a>)+', '', translated_text)
+                
                 translated_chapters = json.loads(cleaned_json_text)
                 for translated_chapter in translated_chapters:
                     chapter_id = translated_chapter['id']
                     html_content = translated_chapter['html_content']
-                    translated_html_map[chapter_id] = html_content
+                    if chapter_id in chapter_map:
+                        target_chapter = chapter_map[chapter_id]
+                        logger.info(f"Applying translated content for chapter '{chapter_id}' from batch task '{task_id}'.")
+                        target_chapter.content = html_mapper.html_to_blocks(html_content, translated_book.image_resources, logger)
+                    else:
+                        logger.warning(f"From batch task {task_id}, found chapter_id '{chapter_id}' which is not in the book map.")
+            except json.JSONDecodeError:
+                logger.error(f"Failed to decode JSON from batch task {task_id}. Skipping this batch.")
             except Exception as e:
-                logger.error(f"Error processing batch task {task_id}: {e}", exc_info=True)
+                logger.error(f"An unexpected error occurred while processing batch task {task_id}: {e}", exc_info=True)
 
+        # 策略二：僅收集被拆分的大章節部分，以便後續統一重組
         elif task_type == 'split_part':
             original_chapter_id = source_data['original_chapter_id']
             if original_chapter_id not in grouped_split_parts:
                 grouped_split_parts[original_chapter_id] = []
             grouped_split_parts[original_chapter_id].append(result)
+        
+        else:
+            logger.warning(f"Unknown task type '{task_type}' in result for task ID {task_id}.")
 
-    # STAGE 2: 重組被拆分的大章節
+    # STAGE 3: 重組並應用被拆分的大章節
     for chapter_id, parts in grouped_split_parts.items():
         if logger: logger.info(f"Re-assembling {len(parts)} split parts for chapter '{chapter_id}'...")
         parts.sort(key=lambda p: p['source_data']['part_number'])
         
+        # 【數據清洗】同樣應用於拆分部分
         cleaned_parts_html = [re.sub(r'(<a href=\\"\\\"></a>)+', '', p['translated_text']) for p in parts]
         full_html_content = "".join(cleaned_parts_html)
-        translated_html_map[chapter_id] = full_html_content
-
-    # STAGE 3: 將所有內容應用到Book對象，並提取標題
-    logger.info("Applying content to book and extracting authoritative titles...")
-    for chapter_id, html_content in translated_html_map.items():
+        
         if chapter_id in chapter_map:
             target_chapter = chapter_map[chapter_id]
-            logger.info(f"Applying translated content for chapter '{chapter_id}'.")
-            
-            # 將HTML轉為Block結構並更新章節內容
-            target_chapter.content = html_mapper.html_to_blocks(html_content, translated_book.image_resources, logger)
-            
-            # ---【健壯的標題提取邏輯】---
-            new_title = ""
-            # 優先從解析後的Block結構中尋找
-            for block in target_chapter.content:
-                if isinstance(block, HeadingBlock):
-                    new_title = block.content_source 
-                    break
-            
-            # 如果Block結構中沒有，則直接從HTML字符串中解析
-            if not new_title:
-                soup = BeautifulSoup(html_content, 'html.parser')
-                h_tag = soup.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
-                if h_tag and h_tag.get_text(strip=True):
-                    new_title = h_tag.get_text(strip=True)
-                    logger.info(f"  - Title for '{chapter_id}' extracted via direct HTML parsing.")
+            logger.info(f"Applying re-assembled content for split chapter '{chapter_id}'.")
+            target_chapter.content = html_mapper.html_to_blocks(full_html_content, translated_book.image_resources, logger)
+        else:
+            logger.warning(f"Could not find original chapter '{chapter_id}' to apply re-assembled split parts.")
 
-            # 更新章節的目標標題
-            if new_title:
-                target_chapter.title_target = new_title
-                logger.info(f"  - Set title for '{chapter.id}': '{new_title}'")
-            elif target_chapter.title:
-                logger.warning(f"  - Could not find a heading in chapter '{chapter_id}'. Using original title '{target_chapter.title}' as fallback.")
-                target_chapter.title_target = target_chapter.title
+    # STAGE 4 & 5 (提取標題和修正目錄) ... 保持不變 ...
+    logger.info("Extracting authoritative titles from translated content...")
+    for chapter in translated_book.chapters:
+        new_title = ""
+        for block in chapter.content:
+            if isinstance(block, HeadingBlock):
+                # 在html_to_blocks中，content_source被優先填充
+                new_title = block.content_source 
+                break
+        if new_title:
+            chapter.title_target = new_title
+            # logger.info(f"  - Set title for '{chapter.id}': '{new_title}'")
+        elif chapter.title:
+            # logger.warning(f"  - Could not find a heading in chapter '{chapter.id}'. Using original title '{chapter.title}' as fallback.")
+            chapter.title_target = chapter.title # Fallback
 
-    # STAGE 4: 修正目錄頁的標題
     final_chapter_id_map = {ch.id: ch for ch in translated_book.chapters}
     _patch_toc_titles(translated_book, final_chapter_id_map, logger)
     
