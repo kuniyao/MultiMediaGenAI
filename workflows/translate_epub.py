@@ -2,6 +2,7 @@ import sys
 import os
 import argparse
 import logging
+import json # <-- 確保導入 json
 # from tqdm import tqdm # 如果有使用，需要替換為非同步版本或暫時移除
 import asyncio # <--- 導入 asyncio
 
@@ -28,9 +29,29 @@ async def main():
     parser = argparse.ArgumentParser(description="使用LLM翻譯EPUB文件，並生成一個新的EPUB。")
     parser.add_argument("epub_path", type=str, help="要翻譯的源EPUB文件的路径。")
     parser.add_argument("--target_lang", type=str, default="zh-CN", help="翻译的目标语言 (例如, zh-CN, ja, ko)。")
-    # 【可選】增加一個控制併發數的參數
     parser.add_argument("--concurrency", type=int, default=10, help="API請求的並發數限制。")
+    parser.add_argument("--prompts", type=str, default="prompts.json", help="Path to a JSON file with prompt templates.")
+    parser.add_argument("--glossary", type=str, default=None, help="Optional path to a JSON glossary file.")
     args = parser.parse_args()
+
+    # --- 載入 Prompts 和詞彙表 ---
+    prompts = {}
+    if os.path.exists(args.prompts):
+        logger.info(f"Loading prompts from {args.prompts}...")
+        with open(args.prompts, 'r', encoding='utf-8') as f:
+            prompts = json.load(f)
+    else:
+        logger.error(f"Prompts file not found at {args.prompts}. Aborting.")
+        return
+
+    glossary = None
+    if args.glossary:
+        if os.path.exists(args.glossary):
+            logger.info(f"Loading glossary from {args.glossary}...")
+            with open(args.glossary, 'r', encoding='utf-8') as f:
+                glossary = json.load(f)
+        else:
+            logger.warning(f"Glossary file specified but not found at {args.glossary}. Proceeding without a glossary.")
 
     source_path = args.epub_path
 
@@ -95,7 +116,9 @@ async def main():
         target_lang=args.target_lang,
         video_specific_output_path=output_dir, # 用於保存日誌
         logger=logger,
-        concurrency=args.concurrency # 傳入併發限制
+        concurrency=args.concurrency, # 傳入併發限制
+        prompts=prompts,      # <-- 傳入 prompts
+        glossary=glossary    # <-- 傳入 glossary
     )
 
     if not translated_results:

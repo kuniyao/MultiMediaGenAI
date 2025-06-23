@@ -63,4 +63,4 @@ SAFETY_MARGIN = 0.9
 # For EN -> ZH, output tokens can be ~2.0x the input tokens.
 # For other languages, this might be different (e.g., EN -> ES is closer to 1.3).
 # This is a critical parameter to prevent exceeding the model's *output* token limit.
-LANGUAGE_EXPANSION_FACTOR = 2.0
+LANGUAGE_EXPANSION_FACTOR = 3.0

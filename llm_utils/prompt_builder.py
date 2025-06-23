@@ -1,7 +1,60 @@
-# llm_utils/prompt_builder.py (MODIFIED FOR STEP 1)
+# llm_utils/prompt_builder.py (refactored)
 
 import json
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
+
+def create_glossary_section(glossary: Optional[Dict[str, str]], template: str) -> str:
+    """
+    If a glossary is provided, creates and formats the glossary section for the prompt.
+    """
+    if not glossary:
+        return ""
+    
+    glossary_items = "\n".join([f'* "{term}": "{translation}"' for term, translation in glossary.items()])
+    return template.format(glossary_items=glossary_items)
+
+def build_prompt_from_template(
+    system_prompt_template: Optional[Dict[str, Any]], 
+    user_prompt_template: Optional[Dict[str, Any]],
+    variables: Dict[str, Any],
+    glossary: Optional[Dict[str, str]] = None,
+    glossary_template: Optional[str] = None
+) -> List[Dict[str, Any]]:
+    """
+    A generic prompt generator that creates a prompt from templates and variables,
+    formatted correctly for the Google Gemini API.
+    """
+    
+    # Handle glossary
+    glossary_section = ""
+    if glossary and glossary_template:
+        glossary_section = create_glossary_section(glossary, glossary_template)
+    
+    # Add the glossary section to the variables for formatting
+    variables['glossary_section'] = glossary_section
+    
+    messages = []
+    
+    # Format system and user prompts
+    system_content = ""
+    if system_prompt_template and 'content' in system_prompt_template:
+        system_content = system_prompt_template['content'].format(**variables)
+        
+    user_content = ""
+    if user_prompt_template and 'content' in user_prompt_template:
+        user_content = user_prompt_template['content'].format(**variables)
+
+    # Merge system and user prompts into a single user message
+    full_user_content = f"{system_content}\n\n{user_content}".strip()
+    
+    if full_user_content:
+        # Build a message structure compatible with the Google Gemini API
+        messages.append({
+            "role": "user",
+            "parts": [full_user_content]
+        })
+        
+    return messages
 
 def construct_prompt_for_batch(segments_list_for_payload, src_lang, tgt_lang, out_text_key, use_simplified_ids=False):
     """
