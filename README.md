@@ -1,138 +1,26 @@
-# MultiMediaGenAI 项目
+# MultiMediaGenAI: 智能多媒体翻译工具集
 
-一个利用大语言模型（LLM）实现多媒体内容（如 YouTube 视频、本地字幕文件）翻译和格式转换的工具集。
+一个利用大语言模型（LLM）实现多媒体内容（如EPUB电子书、YouTube视频、本地字幕文件）翻译和格式转换的工具集。
 
-## 核心功能
+## ✨ 核心功能
 
-- **YouTube 视频翻译**: 输入一个YouTube视频链接，自动获取官方或自动生成的字幕，并将其翻译成指定语言。
-- **本地文件翻译**: 支持直接翻译本地的 `.srt` 字幕文件。
-- **EPUB 文件处理**:
-  - **全自动翻译**: 提供一个由大语言模型（LLM）驱动的端到端工作流 (`workflows/translate_epub.py`)，能够将整本EPUB文件从源语言翻译成目标语言。
-  - **深度解析与重建**: 不仅仅是提取文本，而是深度解析EPUB的内部结构，包括元数据、资源清单、阅读顺序(Spine)、目录(NCX/NAV)等，并在翻译后精确重建。
-  - **智能标题处理**:
-    - **章节标题 (`<title>`)**: 自动提取并翻译每个XHTML章节文件中的`<title>`标签内容，确保在阅读器或浏览器标签页中显示正确的译文标题。
-    - **导航目录 (`nav.xhtml`)**: 能够翻译 ePub 阅读器用于原生目录展示的 `nav.xhtml` 文件中的章节标题。
-    - **内容页 (`Contents`)**: 对于书中生成的目录页（通常标题为 "Contents"），不仅翻译页面标题，还能精确翻译页面内指向各章节的链接条目。
-  - **复杂结构保持**: 能够准确识别并重建复杂的HTML结构，如带容器的图片、嵌套列表、以及由普通`<p>`标签模拟的"伪列表"。
-  - **样式保真**: 精确保留并应用原始的CSS类，同时能处理由HTML标签（如`<strong><small>...</small></strong>`）定义的复杂内联样式，确保转换后的文件在视觉上与原书高度一致。
-- **模块化与可扩展**: 项目遵循高内聚、低耦合的设计原则。核心功能（如日志记录、文件生成、数据获取与处理）都被封装在可重用的工具模块中。
-  - **灵活的Prompt与术语表**: 工作流中使用的 Prompt 和术语表已解耦，便于未来通过外部配置动态指定，以提高翻译的灵活性和准确性。
-- **统一的核心处理逻辑**:
-  - **智能预处理**: 所有字幕（无论来源）都通过统一的 `merge_segments_intelligently` 函数进行预处理，该函数能将零散的片段智能地合并为完整的句子，极大地提升了翻译的上下文连贯性。
-  - **高质量后处理**: 所有翻译完成的文本都通过统一的 `generate_post_processed_srt` 函数进行处理，以生成格式优美、易于阅读的SRT文件。
-- **统一的日志系统**: 所有工作流均采用统一的日志记录器，为每次运行生成独立的、带时间戳的日志文件，便于追踪和调试。
+- **EPUB 电子书全自动翻译**:
+  - **端到端工作流**: 输入一本EPUB电子书，输出一本完整翻译的、保留原格式的EPUB电子书。
+  - **深度结构解析**: 精确保留并翻译元数据、多级目录、章节标题、图注、以及复杂的HTML结构。
+  - **并发与异步**: 基于 `asyncio` 实现高并发翻译，可通过参数控制并发数，显著提升翻译速度。
+  - **配置驱动**: 支持通过外部JSON文件自定义Prompts和术语表（Glossary），以适应不同领域和风格的翻译需求。
 
-## 架构与工作流
+- **YouTube 视频翻译**: 
+  - 输入一个YouTube视频链接，自动获取官方或自动生成的字幕，并将其翻译成指定语言，生成 `.srt` 文件。
 
-本项目的架构经过重构，实现了核心处理逻辑的统一。`workflows/` 目录下的脚本负责定义和编排任务，而具体的执行逻辑则由可复用的工具模块（如 `llm_utils`, `format_converters`）提供。
+- **本地文件翻译**: 
+  - 支持直接翻译本地的 `.srt` 或 `.md` 格式文件。
 
-### 字幕翻译工作流
+- **智能文本处理**:
+  - **片段智能合并**: 在翻译前将零散的字幕/文本片段合并为完整的句子，提升上下文连貫性。
+  - **样式保真**: 在EPUB处理中，精确保留原始的CSS类和HTML标签，确保译文在视觉上与原书高度一致。
 
-所有字幕工作流共享一个统一的翻译入口 `llm_utils.translator.execute_translation`，以及统一的字幕预处理和后处理流程。
-
-工作流的核心流程如下：
-1. **数据获取**: 工作流脚本调用 `youtube_utils` 或 `format_converters` 获取原始字幕数据。
-2. **智能预处理**: 调用 `format_converters.preprocessing.merge_segments_intelligently` 将原始片段合并为完整句子。
-3. **格式适配**: 使用 `common_utils.json_handler` 将合并后的数据转换为统一的"富数据格式"。
-4. **执行翻译**: 将适配后的数据交给 `execute_translation` 函数进行翻译。
-5. **高质量后处理与生成**: 调用 `format_converters.postprocessing.generate_post_processed_srt` 将翻译结果重构为最终的 `.srt` 文件（或 `reconstruct_translated_markdown` 生成 `.md` 文件）。
-
-```mermaid
-graph TD;
-    subgraph A[工作流1: YouTube视频]
-        A1("YouTube 链接") --> A2["youtube_utils<br/>获取原始字幕"];
-    end
-
-    subgraph B[工作流2: 本地文件]
-        B1("本地 .srt 文件") --> B2["format_converters<br/>加载原始字幕"];
-    end
-
-    A2 --> C;
-    B2 --> C;
-
-    subgraph C[统一预处理]
-        direction LR
-        C1["merge_segments_intelligently<br/>智能合并片段"];
-    end
-    
-    C --> D["common_utils.json_handler<br/>适配为标准富数据"];
-
-    subgraph E[核心翻译引擎]
-        direction LR
-        D --> E0["execute_translation<br/>统一翻译入口"];
-        E0 --> E1["LLM<br/>(批处理,提示,API,解析)"];
-    end
-
-    subgraph F[统一后处理]
-        direction LR
-        E1 --> F1["generate_post_processed_srt<br/>优化并生成SRT"];
-    end
-```
-
-### EPUB 处理工作流
-
-```mermaid
-graph TD;
-    subgraph Input [输入]
-        A[EPUB 文件]
-    end
-
-    subgraph Parsing [1. 解析阶段 - EpubParser]
-        direction LR
-        B1["解压EPUB到临时目录"]
-        B2["解析 container.xml<br>找到 .opf 文件"]
-        B3["解析 .opf 文件<br>(元数据, manifest, spine)"]
-        B4["解析 nav.xhtml/toc.ncx<br>获取目录和章节标题"]
-        B5["逐一解析章节HTML<br>映射到内部数据模型(Book)"]
-    end
-
-    subgraph Processing [2. 处理与翻译]
-        C0["智能注入章节标题<br>(用于翻译无头HTML)"]
-        C1["提取Book对象中的文本内容"]
-        C2["调用LLM进行批量翻译"]
-        C3["将翻译结果<br>更新回Book对象"]
-        C4["智能修正内容页目录<br>(ToC Page)的链接标题"]
-    end
-
-    subgraph Writing [3. 生成阶段 - EpubWriter]
-        direction LR
-        D1["创建EPUB文件结构"]
-        D2["写入资源文件<br>(CSS, 图片)"]
-        D3["根据更新后的Book对象<br>生成新的章节XHTML"]
-        D4["根据翻译后的元数据<br>生成新的配置文件<br>(content.opf, nav.xhtml)"]
-        D5["打包生成最终的EPUB文件"]
-    end
-
-    Input --> Parsing;
-    A --> B1 --> B2 --> B3 --> B4 --> B5;
-    Parsing --> Processing;
-    B5 -- book_obj --> C0 --> C1 --> C2 --> C3 --> C4;
-    Processing --> Writing;
-    C4 -- updated_book_obj --> D1 --> D2 --> D3 --> D4 --> D5;
-    subgraph Output [输出]
-        E[翻译后的新 EPUB 文件]
-    end
-    D5 --> E;
-```
-
-## 项目结构说明
-
-- `workflows/`: **核心工作流编排**。项目的入口，每个文件代表一个完整的端到端任务。
-- `llm_utils/`: **大语言模型交互**。封装了与LLM API的通信逻辑。
-- `youtube_utils/`: **YouTube数据获取**。封装了所有与YouTube相关的下载和处理逻辑。
-- `format_converters/`: **数据转换与处理**。负责文件的解析、字幕的预处理、后处理和最终文件内容的生成。
-  - `epub_parser.py`: 提供了强大的 `EpubParser` 类，用于深度解析EPUB文件。
-  - `epub_writer.py`: 提供了 `EpubWriter` 类，用于根据内部数据模型重建EPUB文件。
-  - `preprocessing.py`: 包含核心的智能片段合并逻辑 `merge_segments_intelligently`。
-  - `postprocessing.py`: 包含核心的翻译后优化逻辑 `generate_post_processed_srt`。
-  - `srt_handler.py`: 负责SRT格式的基础解析与生成。
-- `common_utils/`: **通用工具库**。存放项目通用的辅助函数。
-  - `json_handler.py`: 包含关键的数据适配器 `create_pre_translate_json_objects`。
-  - `file_helpers.py`: 提供通用的文件操作函数，如 `save_to_file`。
-  - `log_config.py`: 提供统一的任务日志记录器 `setup_task_logger`。
-
-
-## 快速开始 (Quick Start)
+## 🚀 快速开始
 
 ### 1. 环境设置
 
@@ -141,7 +29,6 @@ graph TD;
 ```bash
 pip install -r requirements.txt
 ```
-*(注意: 如果 `requirements.txt` 文件不存在或过时，您可以使用 `pip freeze > requirements.txt` 命令生成)*
 
 ### 2. 配置 API 密钥
 
@@ -154,56 +41,117 @@ GEMINI_API_KEY="your-gemini-api-key-here"
 
 ### 3. 运行工作流
 
+#### 翻译 EPUB 电子书 (主要工作流)
+
+```bash
+python workflows/translate_epub.py "/path/to/your/book.epub" --target_lang "zh-CN" --concurrency 10
+```
+- **`epub_path`**: (必需) 本地 `.epub` 文件的完整路径。
+- **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
+- **`--concurrency`**: (可选) API请求的并发数，默认为 `10`。
+- **`--prompts`**: (可选) 自定义 Prompts 的JSON文件路径。
+- **`--glossary`**: (可选) 自定义术语表的JSON文件路径。
+
+
 #### 翻译 YouTube 视频
 
 ```bash
 python workflows/translate_youtube_video.py "YOUTUBE_VIDEO_URL_OR_ID" --target_lang "zh-CN"
 ```
-- **`video_url_or_id`**: (必需) YouTube视频的完整URL或视频ID。
-- **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
-- **`--log_level`**: (可选) 设置日志级别 (如 `DEBUG`, `INFO`)，默认为 `INFO`。
 
 #### 翻译本地 SRT 文件
 
 ```bash
 python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_lang "zh-CN"
 ```
-- **`file_path`**: (必需) 本地 `.srt` 字幕文件的完整路径。
-- **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
-- **`--log_level`**: (可选) 设置日志级别 (如 `DEBUG`, `INFO`)，默认为 `INFO`。
 
-#### 翻译 EPUB 电子书
+所有生成的文件，包括日志和翻译结果，将被保存在与源文件相同的目录中。
 
-```bash
-python workflows/translate_epub.py "/path/to/your/book.epub" --target_lang "zh-CN"
+## 🔧 工作流详解
+
+本项目的架构实现了核心处理逻辑的模块化。`workflows/` 目录下的脚本负责编排任务，而具体的执行逻辑则由 `llm_utils`, `format_converters` 等工具模块提供。
+
+### EPUB 翻译工作流
+
+这是项目当前最完善和强大的工作流，其核心优势在于能够对EPUB进行“无损”翻译。
+
+```mermaid
+graph TD;
+    subgraph Input [输入]
+        A[EPUB 文件]
+    end
+
+    subgraph Parsing [1. 解析阶段 - epub_parser.py]
+        direction LR
+        B1["解析 .opf 文件<br>(元数据, manifest, spine)"]
+        B2["解析 nav.xhtml/toc.ncx<br>获取目录结构"]
+        B3["逐一解析章节XHTML<br>构建内部Book对象"]
+    end
+
+    subgraph Processing [2. 翻译阶段]
+        C1["extract_translatable_chapters<br>(book_processor.py)<br>提取所有可翻译内容"]
+        C2["execute_translation_async<br>(translator.py)<br>异步批量翻译"]
+        C3["apply_translations_to_book<br>(book_processor.py)<br>将译文应用回Book对象"]
+    end
+
+    subgraph Writing [3. 生成阶段 - epub_writer.py]
+        direction LR
+        D1["根据更新后的Book对象<br>生成新的章节XHTML"]
+        D2["根据翻译后的元数据<br>生成新的配置文件<br>(content.opf, nav.xhtml)"]
+        D3["打包生成最终的EPUB文件"]
+    end
+
+    Input --> Parsing;
+    A --> B1 --> B2 --> B3;
+    Parsing -- Book Object --> Processing;
+    B3 -- book_obj --> C1 --> C2 --> C3;
+    Processing -- Translated Book Object --> Writing;
+    C3 -- updated_book_obj --> D1 --> D2 --> D3;
+    subgraph Output [输出]
+        E[翻译后的新 EPUB 文件]
+    end
+    D3 --> E;
 ```
-- **`epub_path`**: (必需) 本地 `.epub` 文件的完整路径。
-- **`--target_lang`**: (可选) 目标翻译语言，符合 BCP 47 标准 (例如, `zh-CN`, `ja`, `en`)，默认为 `zh-CN`。
 
-所有生成的文件，包括日志和翻译结果，将被保存在与源文件相同的目录中。例如，翻译 `my_book.epub` 将生成 `my_book_zh_CN.epub`。
+### 字幕翻译工作流
 
-## 已知问题与处理
+所有字幕类工作流（YouTube, 本地SRT文件）共享一套预处理、翻译和后处理逻辑。
 
-### YouTube 字幕中的负时长 (Negative Duration)
+```mermaid
+graph TD;
+    subgraph A[数据源]
+        A1("YouTube 链接")
+        A2("本地 .srt 文件")
+    end
 
-- **问题现象**: 在处理某些YouTube视频时，日志中可能会出现关于"负时长" (`Negative duration detected`) 的警告。
-- **根本原因**: 这是由于 YouTube 的自动语音识别 (ASR) 系统在生成字幕时，可能产生微小的时间戳误差，导致某个字幕片段的计算出的结束时间早于其开始时间。这属于上游数据源的固有问题。
-- **处理策略**: 在 `youtube_utils/data_fetcher.py` 的 `preprocess_and_merge_segments` 函数中，我们不再丢弃这些片段，而是将它们的**时长修正为0**，并保留其文本内容。
-- **结果**: 这样可以确保即使源数据存在微瑕，也不会丢失任何需要翻译的文本内容，保证了翻译的完整性。虽然在生成的SRT文件中，这些片段会成为"零时长"字幕（一闪而过），但这远优于丢失整句内容。
+    subgraph B[统一预处理]
+        direction LR
+        B1["merge_segments_intelligently<br>智能合并片段为完整句子"];
+    end
 
-## EPUB 翻译核心优势
+    subgraph C[核心翻译引擎]
+        direction LR
+        C1["execute_translation<br>统一翻译入口"];
+    end
 
-当前工作流不仅能完成端到端的书籍翻译，还具备以下精细化处理能力，确保了高质量的输出：
+    subgraph D[统一后处理]
+        direction LR
+        D1["generate_post_processed_srt<br>优化并生成SRT"];
+    end
 
-- **完整的目录翻译**:
-  - **导航目录 (`nav.xhtml`)**: 能翻译 ePub 阅读器用于原生目录展示的 `nav.xhtml` 文件中的章节标题，提升阅读器原生体验。
-  - **内容页 (`Contents`)**: 对于书中生成的目录页，能同时翻译页面标题和页面内的所有章节条目链接，保证目录的完整性。
+    A --> B --> C --> D;
+```
 
-- **精确的章节标题翻译**:
-  - 能够提取并翻译每一个独立的XHTML章节文件 `<head>` 部分中的 `<title>` 标签内容。这确保了在阅读器或浏览器标签页中显示的标题与内容语言一致。
+## 📂 项目结构
 
-- **智能化的"无头"内容处理**:
-  - 对于部分章节XHTML文件可能没有 `<h1>/<h2>` 标签（即"无头内容"）的情况，工作流能够智能地从 `toc.ncx` 或 `nav.xhtml` 中获取其应有的标题，在翻译流程中临时注入该标题以获得上下文，翻译完成后再将其从正文中移除，最终将翻译后的标题应用到 `nav.xhtml` 和 `.opf` 元数据中。这一过程确保了即使在结构不规范的源文件中，章节标题也能被正确翻译和应用。
+- `workflows/`: **核心工作流编排**。项目的入口，每个文件代表一个完整的端到端任务。
+- `llm_utils/`: **大语言模型交互**。封装了与LLM API的通信、Prompt构建、并发控制等逻辑。
+- `format_converters/`: **数据转换与处理**。负责文件的解析（EPUB, SRT）、文本的预处理和后处理。
+- `youtube_utils/`: **YouTube数据获取**。封装了所有与YouTube相关的下载和处理逻辑。
+- `common_utils/`: **通用工具库**。存放项目通用的辅助函数（如日志、文件操作）。
+- `outputs/`: **输出目录**。用于存放日志等生成文件（默认行为是在源文件目录生成结果）。
+- `docs/`: **详细设计文档**。存放对主要工作流的详细设计和模块说明。
 
-- **灵活的 Prompt 与术语表管理**:
-  - 工作流中使用的 Prompt 和术语表是解耦的，为未来通过外部配置文件或命令行参数动态指定不同领域、不同风格的翻译指令提供了可能，极大地提高了项目的灵活性和可扩展性。
+## ℹ️ 深入了解
+
+本项目更详细的设计文档、模块功能说明和工作流原理保存在 `docs/` 目录下。推荐在进行二次开发或深入研究前阅读这些文档。
