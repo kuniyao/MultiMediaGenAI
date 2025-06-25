@@ -15,5 +15,13 @@
     "role": "user",
     "content": "# CRITICAL RULES\n1.  PRESERVE ALL TAGS: You MUST keep all HTML tags (e.g., `<p>`, `<h1>`, `<i>`, `<span class=\"foo\">`) and their attributes (`class`, `id`, `href`, etc.) completely unchanged.\n2.  TRANSLATE ONLY TEXT: Only translate the human-readable text content that appears between the HTML tags.\n3.  **Output Format**: Your response must be the raw translated HTML content. Do NOT wrap it in JSON or any other format. Return only the translated HTML string.\n{glossary_section}\n\n# TASK\nNow, please translate the following HTML content from {source_lang} to {target_lang}.\n\n--- START OF HTML CONTENT ---\n{html_content}\n--- END OF HTML CONTENT ---"
   },
+  "html_subtitle_system_prompt": {
+    "role": "system",
+    "content": "You are an expert translator. Your task is to translate the HTML content from {source_lang} to {target_lang}."
+  },
+  "html_subtitle_user_prompt": {
+    "role": "user",
+    "content": "# CRITICAL RULES\n1.  PRESERVE ALL HTML TAGS AND ATTRIBUTES: You MUST keep all HTML tags (e.g., `<div>`, `<p>`) and their attributes (`class`, `data-id`, `data-start`, `data-end`) completely unchanged.\n2.  TRANSLATE ONLY TEXT: Only translate the human-readable text content that appears between the HTML tags.\n3.  MAINTAIN STRUCTURE: The output MUST be a single, valid HTML document with the exact same structure as the input.\n{glossary_section}\n\n# TASK\nNow, please translate the following HTML content from {source_lang} to {target_lang}.\n\n--- START OF HTML CONTENT ---\n{html_content}\n--- END OF HTML CONTENT ---"
+  },
   "glossary_injection_template": "\n# GLOSSARY\nYou MUST use the following translations for the given terms:\n{glossary_items}\n"
 } 

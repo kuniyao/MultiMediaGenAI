@@ -7,6 +7,7 @@ import logging.handlers
 from datetime import datetime
 from dotenv import load_dotenv
 import sys # Add sys
+import json
 
 # Determine project root and add to sys.path
 # In this new structure, __file__ will refer to this workflow script's path.
@@ -23,14 +24,13 @@ import config # Assuming config.py is in the project root or PYTHONPATH
 from common_utils.file_helpers import sanitize_filename, save_to_file
 from common_utils.log_config import setup_task_logger
 from format_converters import (
-    transcript_to_markdown, 
-    segments_to_srt_string,
     reconstruct_translated_markdown,
     generate_post_processed_srt
 )
+from format_converters.book_schema import SubtitleTrack, SubtitleSegment
 from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, fetch_and_prepare_transcript
-from llm_utils.translator import execute_translation
-from common_utils.json_handler import create_pre_translate_json_objects, save_json_objects_to_jsonl, load_json_objects_from_jsonl
+from llm_utils.translator import execute_translation_async
+from llm_utils.subtitle_processor import subtitle_track_to_html_tasks, update_track_from_html_response
 
 # Placeholder for the YouTube translation workflow
 
@@ -111,64 +111,30 @@ def _setup_environment_and_logging(args):
         "video_title": video_title
     }
 
-def _create_pre_translation_artifacts(transcript_data, lang_code, source_type, video_id, video_output_path, file_basename_prefix, logger):
-    """Creates and saves artifacts required before translation, like original markdown and pre-translation JSONL."""
-    # Save original transcript as Markdown
-    original_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_original_merged_{lang_code}.md")
-    original_md = transcript_to_markdown(transcript_data, lang_code, source_type, video_id, logger=logger)
-    save_to_file(original_md, original_md_filename, logger=logger)
+def _generate_output_files(translated_track: SubtitleTrack, target_lang, video_output_path, file_basename_prefix, logger):
+    """Generates and saves the final output files (SRT, Markdown) from a SubtitleTrack object."""
     
-    # Create and Save Pre-Translate JSONL
-    logger.info("Creating JSON objects for pre-translation enrichment and LLM input...")
-    pre_translate_json_objects = create_pre_translate_json_objects(
-        processed_segments=transcript_data,
-        video_id=video_id,
-        original_lang=lang_code,
-        source_type=source_type,
-        logger=logger
-    )
-
-    if not pre_translate_json_objects:
-        logger.error("No JSON objects were created for pre-translation. Skipping translation.")
-        return None
-
-    pre_translate_jsonl_filename = os.path.join(video_output_path, f"{file_basename_prefix}_pre_translate_{lang_code}.jsonl")
-    if not save_json_objects_to_jsonl(pre_translate_json_objects, pre_translate_jsonl_filename, logger=logger):
-        logger.error(f"Failed to save pre-translate JSON objects to: {pre_translate_jsonl_filename}. Proceeding with in-memory data, but this may indicate a file system issue.")
-    
-    return pre_translate_json_objects
-
-def _generate_output_files(translated_json_objects, target_lang, lang_code, source_type, video_id, video_output_path, file_basename_prefix, logger):
-    """Generates and saves the final output files (SRT, Markdown)."""
-    # (Optional) Save Post-Translate JSONL
-    post_translate_jsonl_filename = os.path.join(video_output_path, f"{file_basename_prefix}_post_translate_{target_lang}.jsonl")
-    if not save_json_objects_to_jsonl(translated_json_objects, post_translate_jsonl_filename, logger=logger):
-        logger.warning(f"Failed to save post-translate JSON objects to: {post_translate_jsonl_filename}. This is not critical for SRT/MD generation if data is in memory.")
-
     # Generate translated Markdown
     translated_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{target_lang}.md")
     translated_md_content = reconstruct_translated_markdown(
-        translated_json_objects,
-        lang_code,
-        source_type,
-        target_lang,
-        video_id,
+        subtitle_track=translated_track,
+        target_lang=target_lang,
         logger=logger
     )
     save_to_file(translated_md_content, translated_md_filename, logger=logger)
 
-    # Generate translated SRT using the new, centralized post-processing function
-    translated_srt_content = generate_post_processed_srt(translated_json_objects, logger)
+    # Generate translated SRT
     translated_srt_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{target_lang}.srt")
+    translated_srt_content = generate_post_processed_srt(
+        subtitle_track=translated_track,
+        logger=logger
+    )
     save_to_file(translated_srt_content, translated_srt_filename, logger=logger)
 
 def _log_summary(video_output_path, file_basename_prefix, lang_code, target_lang, logger):
     """Logs a summary of all generated output files."""
-    original_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_original_merged_{lang_code}.md")
     translated_md_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{target_lang}.md")
     translated_srt_filename = os.path.join(video_output_path, f"{file_basename_prefix}_translated_{target_lang}.srt")
-    pre_translate_jsonl_filename = os.path.join(video_output_path, f"{file_basename_prefix}_pre_translate_{lang_code}.jsonl")
-    post_translate_jsonl_filename = os.path.join(video_output_path, f"{file_basename_prefix}_post_translate_{target_lang}.jsonl")
     raw_llm_log_expected_filename = os.path.join(video_output_path, f"llm_raw_responses_{target_lang.lower().replace('-', '_')}.jsonl")
     
     # We need to find the actual log file path from the logger's handlers
@@ -179,31 +145,33 @@ def _log_summary(video_output_path, file_basename_prefix, lang_code, target_lang
             break
 
     logger.info("\n--- Summary of Output Files ---")
-    if os.path.exists(original_md_filename):
-        logger.info(f"Original transcript (MD): {original_md_filename}")
     if os.path.exists(translated_md_filename):
         logger.info(f"Translated transcript (MD): {translated_md_filename}")
     if os.path.exists(translated_srt_filename):
         logger.info(f"Translated transcript (SRT): {translated_srt_filename}")
-    if os.path.exists(pre_translate_jsonl_filename):
-        logger.info(f"Pre-translation data (JSONL): {pre_translate_jsonl_filename}")
-    if os.path.exists(post_translate_jsonl_filename):
-        logger.info(f"Post-translation data (JSONL): {post_translate_jsonl_filename}")
     if os.path.exists(raw_llm_log_expected_filename):
         logger.info(f"Raw LLM responses log: {raw_llm_log_expected_filename}")
     if log_file_full_path and os.path.exists(log_file_full_path):
         logger.info(f"Video processing log: {log_file_full_path}")
 
-
-def main():
-    """Main function to orchestrate the YouTube video translation workflow."""
+async def main_async():
+    """Main async function to orchestrate the YouTube video translation workflow."""
     args = _parse_args()
     
-    # Setup environment and get a logger. A dictionary is used for the results
-    # to avoid a long list of return values and to make the code more readable.
     setup_results = _setup_environment_and_logging(args)
     task_logger = setup_results["task_logger"]
+    project_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
+    prompts = {}
+    try:
+        prompts_path = os.path.join(project_root_dir, 'prompts.json')
+        with open(prompts_path, 'r', encoding='utf-8') as f:
+            prompts = json.load(f)
+        task_logger.info(f"Successfully loaded prompts from {prompts_path}")
+    except Exception as e:
+        task_logger.error(f"FATAL: Failed to load or parse prompts.json: {e}")
+        return
+
     try:
         task_logger.info(f"--- YouTube Translator workflow started for input: {args.video_url_or_id} ---")
         
@@ -216,45 +184,74 @@ def main():
             task_logger.error("Workflow terminated due to failure in transcript processing.")
             return
 
-        # 2. Create pre-translation artifacts (original MD, pre-translate JSONL)
-        pre_translate_json_objects = _create_pre_translation_artifacts(
-            transcript_data=merged_transcript_data,
-            lang_code=lang_code,
-            source_type=source_type,
+        # 2. 将获取的数据实例化为 SubtitleTrack 对象
+        task_logger.info("创建 SubtitleTrack 数据模型...")
+        subtitle_track = SubtitleTrack(
             video_id=setup_results['video_id'],
-            video_output_path=setup_results['video_output_path'],
-            file_basename_prefix=setup_results['file_basename_prefix'],
-            logger=task_logger
+            source_lang=lang_code,
+            source_type=source_type
         )
-        if not pre_translate_json_objects:
-            task_logger.error("Workflow terminated due to failure in pre-translation artifact creation.")
-            return
-
-        # 3. Run translation
-        translated_json_objects = execute_translation(
-            pre_translate_json_list=pre_translate_json_objects,
+        for i, seg_data in enumerate(merged_transcript_data):
+            subtitle_track.segments.append(
+                SubtitleSegment(
+                    id=f"seg_{i:04d}", # 使用简单递增ID
+                    start=seg_data['start'],
+                    end=seg_data.get('end', seg_data['start'] + seg_data.get('duration', 0)),
+                    source_text=seg_data['text']
+                )
+            )
+        
+        # 1. 创建批处理任务
+        tasks_to_translate = subtitle_track_to_html_tasks(subtitle_track, logger=task_logger)
+        
+        # 2. 调用通用的翻译模块
+        task_logger.info("调用核心翻译模块...")
+        translation_results = await execute_translation_async(
+            tasks_to_translate=tasks_to_translate,
             source_lang_code=lang_code,
             target_lang=args.target_lang,
             video_specific_output_path=setup_results['video_output_path'],
-            logger=task_logger
+            logger=task_logger,
+            prompts=prompts
         )
-        if not translated_json_objects:
+
+        if not translation_results:
             task_logger.error("Workflow terminated due to translation failure.")
             return
 
-        # 4. Generate output files (translated MD, translated SRT, post-translate JSONL)
+        # 3. 在工作流内部处理返回的结果，更新字幕轨道
+        task_logger.info("从LLM响应中解析所有HTML批次并更新字幕轨道...")
+        total_updated_count = 0
+        for result in translation_results:
+            translated_html = result.get("translated_text")
+            task_id = result.get("llm_processing_id")
+            if not translated_html:
+                task_logger.warning(f"翻译结果批次 {task_id} 中缺少 'translated_text'，跳过此批次。")
+                continue
+            updated_in_batch = update_track_from_html_response(
+                track=subtitle_track,
+                translated_html=translated_html,
+                logger=task_logger
+            )
+            total_updated_count += updated_in_batch
+        
+        # 4. 在这里进行最终的数量检查
+        final_segment_count = len(subtitle_track.segments)
+        if total_updated_count != final_segment_count:
+             task_logger.warning(f"最终更新的片段总数 ({total_updated_count}) 与原始片段总数 ({final_segment_count}) 不匹配。")
+        else:
+             task_logger.info(f"成功更新了全部 {total_updated_count}/{final_segment_count} 个片段。")
+
+        # 5. 生成输出文件 (现在传递的是已经就地更新的 subtitle_track)
         _generate_output_files(
-            translated_json_objects=translated_json_objects,
+            translated_track=subtitle_track,
             target_lang=args.target_lang,
-            lang_code=lang_code,
-            source_type=source_type,
-            video_id=setup_results['video_id'],
             video_output_path=setup_results['video_output_path'],
             file_basename_prefix=setup_results['file_basename_prefix'],
             logger=task_logger
         )
 
-        # 5. Log summary of generated files
+        # 6. Log summary of generated files
         _log_summary(
             video_output_path=setup_results['video_output_path'],
             file_basename_prefix=setup_results['file_basename_prefix'],
@@ -267,10 +264,9 @@ def main():
         task_logger.info(f"--- YouTube Translator workflow finished for input: {args.video_url_or_id} ---")
 
     except Exception as e:
-        # A broad exception handler to log any unexpected errors during the workflow.
         task_logger.critical(f"An unexpected error terminated the workflow: {e}", exc_info=True)
         sys.exit(1)
 
-
 if __name__ == "__main__":
-    main() 
+    import asyncio
+    asyncio.run(main_async()) 

@@ -115,6 +115,10 @@ class Translator:
                 system_prompt_template = self.prompts.get('html_split_part_system_prompt')
                 user_prompt_template = self.prompts.get('html_split_part_user_prompt')
                 variables["html_content"] = task['text_to_translate']
+            elif task_type == 'html_subtitle_batch':
+                system_prompt_template = self.prompts.get('html_subtitle_system_prompt')
+                user_prompt_template = self.prompts.get('html_subtitle_user_prompt')
+                variables["html_content"] = task['text_to_translate']
             else:
                 self.logger.warning(f"Unknown task type '{task_type}' for task ID {task_id}. Skipping.")
                 continue
@@ -156,36 +160,37 @@ class Translator:
         return translated_results
 
 async def execute_translation_async(
-    pre_translate_json_list: list, 
+    tasks_to_translate: list,  # <--- 改回通用参数名
     source_lang_code: str, 
     target_lang: str, 
     video_specific_output_path: str | None = None, 
     logger: logging.Logger | None = None,
-    concurrency: int = 10,
-    prompts: Optional[Dict] = None,      # <-- 接收 prompts
-    glossary: Optional[Dict[str, str]] = None # <-- 接收 glossary
-) -> list | None:
+    concurrency: int = 5,
+    prompts: Optional[Dict] = None,
+    glossary: Optional[Dict[str, str]] = None
+) -> list | None: # <--- 返回通用的列表
     logger_to_use = logger if logger else logging.getLogger(__name__)
     translator = Translator(logger=logger_to_use, prompts=prompts)
 
-    logger_to_use.info(f"Starting async chapter-by-chapter translation from '{source_lang_code}' to '{target_lang}'...")
+    logger_to_use.info(f"Starting async translation for {len(tasks_to_translate)} tasks from '{source_lang_code}' to '{target_lang}'...")
     
-    translated_json_objects = await translator.translate_chapters_async(
-        chapter_tasks=pre_translate_json_list,
+    # 直接传递收到的任务列表
+    translated_results = await translator.translate_chapters_async(
+        chapter_tasks=tasks_to_translate,
         source_lang_code=source_lang_code,
         target_lang=target_lang,
         output_path=video_specific_output_path,
         concurrency_limit=concurrency,
-        glossary=glossary # <-- 傳入 glossary
+        glossary=glossary
     )
 
-    if not translated_json_objects:
+    if not translated_results:
         logger_to_use.error("Translation failed or returned no results.")
         return None
         
-    if len(translated_json_objects) != len(pre_translate_json_list):
-        logger_to_use.critical(f"CRITICAL: Task count mismatch! Input tasks: {len(pre_translate_json_list)}, Output results: {len(translated_json_objects)}")
-        return None
+    if len(translated_results) != len(tasks_to_translate):
+        logger_to_use.critical(f"CRITICAL: Task count mismatch! Input tasks: {len(tasks_to_translate)}, Output results: {len(translated_results)}")
+        # 即使不匹配，也继续处理，让调用者决定如何处理
     
     logger_to_use.info("Task count integrity check passed.")
-    return translated_json_objects
+    return translated_results # <--- 返回通用的结果列表

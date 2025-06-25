@@ -1,7 +1,10 @@
 import re
 from .srt_handler import segments_to_srt_string
+from .book_schema import SubtitleTrack, SubtitleSegment
+from typing import List
+import logging
 
-def post_process_translated_segments(segments, max_chars_per_line=35, max_lines=2):
+def post_process_translated_segments(segments: List[SubtitleSegment], max_chars_per_line=35, max_lines=2) -> List[dict]:
     """
     Post-processes translated segments using a hybrid re-timing approach.
     - Uses 'average' timing for dialogue splits to ensure stability.
@@ -12,17 +15,17 @@ def post_process_translated_segments(segments, max_chars_per_line=35, max_lines=
         final_segments.extend(_process_one_segment_hybrid(seg, max_chars_per_line, max_lines))
     return final_segments
 
-def _process_one_segment_hybrid(segment, max_chars_per_line, max_lines):
-    text = segment.get('translation', segment.get('text', '')).strip()
-    start_time = segment['start']
-    end_time = segment['end']
+def _process_one_segment_hybrid(segment: SubtitleSegment, max_chars_per_line, max_lines):
+    text = segment.translated_text.strip()
+    start_time = segment.start
+    end_time = segment.end
     duration = end_time - start_time
 
     if not text or duration <= 0:
-        return [segment]
+        return [{'start': start_time, 'end': end_time, 'text': text}]
 
     # --- Stage 1: Dialogue Splitting (Macro - Averaging) ---
-    dialogue_splitter = re.compile(r'\s*-\s*')
+    dialogue_splitter = re.compile(r'\\s*-\\s*')
     dialogue_parts = [p.strip() for p in dialogue_splitter.split(text) if p.strip()]
 
     if len(dialogue_parts) > 1:
@@ -41,11 +44,13 @@ def _process_one_segment_hybrid(segment, max_chars_per_line, max_lines):
             part_end_time = current_time + avg_duration_per_dialogue
             
             # For each dialogue part, do a proportional split for punctuation
-            inner_segments = _split_by_punctuation_proportional({
+            # We create a temporary segment-like dictionary for the inner function
+            temp_segment_for_split = {
                 'start': part_start_time,
                 'end': part_end_time,
-                'translation': part_text
-            }, max_chars_per_line, max_lines)
+                'text': part_text
+            }
+            inner_segments = _split_by_punctuation_proportional(temp_segment_for_split, max_chars_per_line, max_lines)
             
             all_new_segments.extend(inner_segments)
             current_time = part_end_time
@@ -58,11 +63,16 @@ def _process_one_segment_hybrid(segment, max_chars_per_line, max_lines):
 
     else:
         # No dialogue splits, just split by punctuation proportionally
-        return _split_by_punctuation_proportional(segment, max_chars_per_line, max_lines)
+        temp_segment_for_split = {
+            'start': start_time,
+            'end': end_time,
+            'text': text
+        }
+        return _split_by_punctuation_proportional(temp_segment_for_split, max_chars_per_line, max_lines)
 
 
-def _split_by_punctuation_proportional(segment, max_chars_per_line, max_lines):
-    text = segment.get('translation', segment.get('text', '')).strip()
+def _split_by_punctuation_proportional(segment: dict, max_chars_per_line, max_lines):
+    text = segment.get('text', '').strip()
     start_time = segment['start']
     end_time = segment['end']
     duration = end_time - start_time
@@ -104,7 +114,8 @@ def _split_by_punctuation_proportional(segment, max_chars_per_line, max_lines):
 
 def _wrap_and_create_segment(text, start, end, max_chars, max_lines):
     wrapped_text = _wrap_text(text, max_chars, max_lines)
-    return {'start': start, 'end': end, 'translation': wrapped_text}
+    # The output format must match what segments_to_srt_string expects
+    return {'start': start, 'end': end, 'text': wrapped_text}
 
 def _wrap_text(text, max_chars_per_line, max_lines):
     """
@@ -148,42 +159,32 @@ def _wrap_text(text, max_chars_per_line, max_lines):
         lines[-1] = "\n".join(final_line_wrapped[:max_lines - len(lines) +1])
 
 
-    return "\n".join(lines).strip() 
+    return "\n".join(lines).strip()
 
-def generate_post_processed_srt(translated_json_objects, logger):
+def generate_post_processed_srt(subtitle_track: SubtitleTrack, logger: logging.Logger):
     """
-    Takes translated JSON objects, post-processes them for optimal SRT formatting,
-    and returns the final SRT content as a string.
-    This is the centralized function for creating high-quality SRT files.
+    Takes a translated SubtitleTrack object, post-processes its segments for 
+    optimal SRT formatting, and returns the final SRT content as a string.
 
     Args:
-        translated_json_objects (list): The list of rich JSON objects from the translator.
+        subtitle_track (SubtitleTrack): The track object containing translated segments.
         logger: A logger instance.
 
     Returns:
         str: The fully processed SRT content.
     """
-    # 1. Prepare segments for post-processing
-    segments_for_processing = []
-    for item in translated_json_objects:
-        try:
-            # Reconstruct the object that post_process_translated_segments expects
-            segment_data = item['source_data']
-            segment_data['translation'] = item['translated_text']
-            # Ensure start and end times are available
-            if 'end' not in segment_data:
-                segment_data['end'] = segment_data['start'] + segment_data.get('duration_seconds', 0)
-            segments_for_processing.append(segment_data)
-        except (KeyError, TypeError) as e:
-            logger.error(f"Skipping segment in SRT generation due to data error: {e}. Item: {item}")
-            continue
-
-    # 2. Run the main post-processing logic
+    if not subtitle_track.segments:
+        logger.warning("Subtitle track contains no segments. Returning empty SRT content.")
+        return ""
+        
+    # 1. Run the main post-processing logic
     logger.info("Post-processing translated segments for optimal formatting...")
-    final_segments = post_process_translated_segments(segments_for_processing)
+    # The segments from the track are passed to the processor
+    final_segments_as_dicts = post_process_translated_segments(subtitle_track.segments)
 
-    # 3. Generate the final SRT string
+    # 2. Generate the final SRT string
     logger.info("Generating SRT content from final segments...")
-    translated_srt_content = segments_to_srt_string(final_segments)
+    # srt_handler expects a list of dictionaries with 'start', 'end', and 'text' keys
+    translated_srt_content = segments_to_srt_string(final_segments_as_dicts)
     
     return translated_srt_content 

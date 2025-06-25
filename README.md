@@ -73,7 +73,7 @@ python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_la
 
 ### EPUB 翻译工作流
 
-这是项目当前最完善和强大的工作流，其核心优势在于能够对EPUB进行“无损”翻译。
+这是项目当前最完善和强大的工作流，其核心优势在于能够对EPUB进行"无损"翻译。
 
 ```mermaid
 graph TD;
@@ -119,27 +119,22 @@ graph TD;
 
 ```mermaid
 graph TD;
-    subgraph A[数据源]
-        A1("YouTube 链接")
-        A2("本地 .srt 文件")
+    subgraph Input [输入]
+        A[YouTube 链接]
     end
-
-    subgraph B[统一预处理]
-        direction LR
-        B1["merge_segments_intelligently<br>智能合并片段为完整句子"];
+    subgraph Processing [处理流程]
+        B["获取字幕并构建 SubtitleTrack 对象"]
+        C["转换为 HTML 格式进行翻译<br>(保留时间戳等元数据)"]
+        D["更新 SubtitleTrack 对象并生成文件"]
     end
-
-    subgraph C[核心翻译引擎]
-        direction LR
-        C1["execute_translation<br>统一翻译入口"];
-    end
-
-    subgraph D[统一后处理]
-        direction LR
-        D1["generate_post_processed_srt<br>优化并生成SRT"];
+    subgraph Output [输出]
+        E[".srt 字幕文件"]
+        F[".md 双语对照文件"]
     end
 
     A --> B --> C --> D;
+    D --> E;
+    D --> F;
 ```
 
 ## 📂 项目结构

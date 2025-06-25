@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import List, Union, Literal, Optional, Dict, Annotated
 from pydantic import BaseModel, Field, field_serializer, field_validator
 import base64
+import uuid
 
 # ==============================================================================
 #  元数据模型 (Metadata Models)
@@ -232,3 +233,23 @@ class Book(BaseModel):
     chapters: List[Chapter]
     image_resources: Dict[str, ImageResource] = Field(default_factory=dict)
     css_resources: Dict[str, CSSResource] = Field(default_factory=dict)
+
+# ==============================================================================
+# 6. 字幕结构 (Subtitle Structure)
+# ==============================================================================
+
+class SubtitleSegment(BaseModel):
+    """代表一个独立的字幕片段。"""
+    id: str = Field(default_factory=lambda: f"seg_{uuid.uuid4().hex[:8]}")
+    start: float
+    end: float
+    source_text: str
+    translated_text: str = ""
+
+class SubtitleTrack(BaseModel):
+    """代表一个完整的字幕轨道。"""
+    video_id: str
+    source_lang: str
+    source_type: Literal["manual", "generated"]
+    segments: List[SubtitleSegment] = Field(default_factory=list)
+

@@ -96,22 +96,19 @@ graph TD;
 
 - **主控脚本**: `workflows/translate_epub.py`
 - **核心模块**: `llm_utils.translator`
-- **核心函数**: `execute_translation_async(...)`
+- **核心函数**: `Translator.translate_async(...)`
 
 **任务与职责**:
 1.  这是整个工作流的性能核心和与LLM交互的中心。
-2.  它接收"翻译任务"列表，以及语言、并发数、Prompts、术语表等配置。
+2.  它接收一个**预先准备好**的"翻译任务"列表。每个任务都已包含了发送给 LLM API 的最终内容。
 3.  **并发管理**: 使用 `asyncio` 和 `asyncio.Semaphore` 来管理并发API请求的数量，防止因请求过快而触发API的速率限制。
-4.  **Prompt 构建**: 为每个文本块动态构建符合要求的Prompt，其中可能包含翻译指令、上下文、术语表等。
-5.  **API 调用**: 异步调用大语言模型（如 Gemini）的API。
-6.  **错误处理与重试**: (未来优化点) 内部应包含针对单个API调用的错误处理和重试逻辑。
-7.  **缓存机制**: (未来优化点) 在此层级植入缓存逻辑，可以跳过对已有翻译文本的重复请求。
-8.  函数 `await` 执行完成后，返回一个翻译结果列表，每个结果都带有原始的 `llm_processing_id`。
+4.  **API 调用**: 异步地、并发地执行对大语言模型（如 Gemini）的 API 调用。
+5.  **职责分离**: `Translator` 模块本身已不再负责构建 Prompt。Prompt 的构建和任务内容的生成，现在由上游的工作流（如 `translate_epub.py`）使用 `prompt_builder` 等工具完成。这使得 `Translator` 成为一个更通用、可复用的组件。
+6.  函数 `await` 执行完成后，返回一个翻译结果列表，每个结果都带有原始的任务ID，以便上游进行匹配。
 
 **关键内部函数 (`Translator` 类):**
-- `translate_chapters_async(...)`: 编排整个异步翻译流程，为每个翻译任务创建一个 `asyncio` 任务。
-- `_call_gemini_api_async(...)`: 实际执行单次对LLM API的异步调用。它被信号量（Semaphore）包裹，以控制并发。
-- `build_prompt_from_template(...)` (来自 `prompt_builder`): 一个关键的辅助函数，它根据任务类型（批处理或单块）和配置（术语表），从模板动态生成最终发送给API的完整Prompt。
+- `translate_async(...)`: 编排整个异步翻译流程的主函数。它接收任务列表和并发配置，创建并运行所有 `asyncio` 任务。
+- `_call_gemini_api_async(...)`: 一个私有辅助方法，负责执行单次对 LLM API 的异步调用。它被 `asyncio.Semaphore` 包裹，以精确控制并发数量。
 
 ### 4. 结果应用 (Application)
 

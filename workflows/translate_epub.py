@@ -111,7 +111,7 @@ async def main():
 
     # 【關鍵】使用 await 呼叫新的非同步函式
     translated_results = await execute_translation_async(
-        pre_translate_json_list=tasks_for_translator,
+        tasks_to_translate=tasks_for_translator,
         source_lang_code=source_lang,
         target_lang=args.target_lang,
         video_specific_output_path=output_dir, # 用於保存日誌
