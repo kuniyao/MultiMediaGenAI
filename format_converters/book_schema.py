@@ -250,6 +250,6 @@ class SubtitleTrack(BaseModel):
     """代表一个完整的字幕轨道。"""
     video_id: str
     source_lang: str
-    source_type: Literal["manual", "generated"]
+    source_type: Literal["manual", "generated", "local_srt_file"]
     segments: List[SubtitleSegment] = Field(default_factory=list)
 

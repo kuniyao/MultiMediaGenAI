@@ -4,12 +4,13 @@
 
 - **执行入口**: `workflows/translate_from_file.py`
 - **核心目标**: 输入一个本地 `.srt` 文件路径，输出一个翻译后的、经过优化排版的新的 `.srt` 文件。
+- **核心数据结构**: `format_converters.book_schema.SubtitleTrack`
 
 ---
 
 ## 工作流架构
 
-与YouTube视频翻译流程类似，此工作流贯彻了统一的字幕处理逻辑，确保了不同来源的字幕都能获得一致的高质量翻译和格式化输出。
+此工作流与YouTube视频翻译工作流采用完全一致的核心逻辑，确保了不同来源的字幕都能通过统一的、健壮的流程进行处理，获得高质量的翻译和格式化输出。它围绕一个中心数据结构 `SubtitleTrack` 展开，使用 HTML 作为与大语言模型（LLM）交换数据的格式。
 
 ```mermaid
 graph TD;
@@ -17,98 +18,79 @@ graph TD;
         A[本地 .srt 文件]
     end
 
-    subgraph Preprocessing [1. 预处理]
-        direction LR
-        B1["load_and_merge_srt_segments<br>(format_converters.srt_handler)"]
-    end
-
-    subgraph Adaption [2. 格式适配]
-        direction LR
-        C1["create_pre_translate_json_objects<br>(common_utils.json_handler)"]
-    end
-    
-    subgraph Translation [3. 核心翻译]
-        direction LR
-        D1["execute_translation<br>(llm_utils.translator)"]
-    end
-
-    subgraph Postprocessing [4. 后处理与生成]
-        direction LR
-        E1["generate_post_processed_srt<br>(format_converters.postprocessing)"]
+    subgraph Processing [处理流程]
+        B["<b>1. 加载并合并字幕片段</b><br>(preprocessing.load_and_merge_srt_segments)"]
+        C["<b>2. 构建 SubtitleTrack 数据对象</b><br>(workflow script)"]
+        D["<b>3. 将轨道转换为批量HTML任务</b><br>(llm_utils.subtitle_processor)"]
+        E["<b>4. 并发翻译HTML任务</b><br>(llm_utils.translator)"]
+        F["<b>5. 将HTML结果更新回轨道</b><br>(llm_utils.subtitle_processor)"]
+        G["<b>6. 生成SRT文件内容并保存</b><br>(postprocessing & file_helpers)"]
     end
 
     subgraph Output [输出]
-        F[翻译后的新 .srt 文件]
+        H[翻译后的 .srt 文件]
     end
 
-    A --> B1 -- 合并后的文本片段 --> C1 -- 标准化JSON --> D1 -- 翻译结果 --> E1 --> F;
+    A --> B --> C --> D --> E --> F --> G --> H;
 ```
 
 ---
 
 ## 模块化步骤详解
 
-### 1. 预处理 (Preprocessing)
+### 1. 数据加载与预处理 (Data Loading & Preprocessing)
 
-- **主控脚本**: `workflows/translate_from_file.py`
-- **核心模块**: `format_converters.preprocessing` (由 `srt_handler` 调用)
-- **核心函数**: `load_and_merge_srt_segments(file_path, logger)`
+-   **主控脚本**: `workflows/translate_from_file.py`
+-   **核心函数**: `format_converters.preprocessing.load_and_merge_srt_segments(...)`
+-   **任务与职责**: 这是工作流的数据输入和准备阶段。`load_and_merge_srt_segments` 函数负责：
+    1.  **文件解析**: 在内部调用 `srt_handler.srt_to_segments`，使用 `pysrt` 库将本地的 `.srt` 文件内容解析成标准的片段列表。
+    2.  **智能合并**: 将解析出的片段列表传递给 `merge_segments_intelligently` 函数。此函数通过分析标点和节奏，将零散的字幕片段合并成更完整的句子，为后续翻译提供高质量的上下文。
+-   **输出**: 一个经过合并优化的、适合翻译的片段列表 (`list[dict]`)。
 
-**任务与职责**:
-1.  接收本地 `.srt` 文件的路径。
-2.  首先，使用 `pysrt` 库解析文件，将其转换为一个标准的片段列表。
-3.  然后，调用 `format_converters.preprocessing.merge_segments_intelligently` 函数。
-4.  这个关键的预处理函数会将原本零散的字幕片段（通常按时间戳分割）智能地合并成更符合自然语言习惯的、完整的句子或段落。
-5.  返回一个处理过的、适合进行上下文翻译的片段列表。
+### 2. 构建数据对象 (Data Modeling)
 
-**关键内部函数:**
-- `srt_to_segments(...)` (来自 `srt_handler`): 使用 `pysrt` 库将原始的 SRT 文件内容解析成一个包含开始时间、结束时间和文本的字典列表。
-- `merge_segments_intelligently(...)` (来自 `preprocessing`): 这是预处理的核心。它通过复杂的逻辑（包括分析标点符号）将多个短小的字幕片段合并成一个完整的句子，为翻译提供更好的上下文，从而显著提升翻译质量。
+-   **主控脚本**: `workflows/translate_from_file.py`
+-   **核心数据结构**: `format_converters.book_schema.SubtitleTrack`
+-   **任务与职责**: 此步骤将无格式的片段列表转换为标准化的、强类型的数据对象。
+    1.  **实例化 `SubtitleTrack`**: 在主控脚本中，会创建一个 `SubtitleTrack` 对象。
+    2.  **填充 `SubtitleSegment`**: 遍历上一步返回的片段列表，为每个片段创建一个 `SubtitleSegment` 对象（包含ID、时间戳和原文），并将其添加到 `SubtitleTrack` 的 `segments` 列表中。
+-   **核心价值**: 这一步是统一工作流的关键。通过将数据统一到 `SubtitleTrack` 这个"单一事实来源"中，后续所有操作都围绕此对象进行，实现了与YouTube工作流在逻辑层面的完全统一。
 
-### 2. 格式适配 (Adaption)
+### 3. 创建翻译任务 (Task Creation)
 
-- **主控脚本**: `workflows/translate_from_file.py`
-- **核心模块**: `common_utils.json_handler`
-- **核心函数**: `create_pre_translate_json_objects(...)`
+-   **主控脚本**: `workflows/translate_from_file.py`
+-   **核心函数**: `llm_utils.subtitle_processor.subtitle_track_to_html_tasks(...)`
+-   **任务与职责**: 此步骤直接复用了为YouTube工作流开发的核心逻辑。
+    1.  **智能分批与HTML格式化**: 该函数接收 `SubtitleTrack` 对象，根据Token限制将所有片段智能地划分为多个批次。在分批时，每个片段的原文都被序列化为一段带有 `data-id` 等元数据属性的HTML，确保LLM在翻译时不会破坏这些关键信息。
+-   **输出**: 一个 "翻译任务" 列表，其中每一项都包含了准备发往LLM的HTML字符串。
 
-**任务与职责**:
-1.  接收上一步生成的片段列表。
-2.  将这些片段转换为项目内部统一的"待翻译JSON对象"格式。
-3.  这个JSON对象是一种富文本格式，它不仅包含待翻译的文本，还封装了元数据，如唯一的ID（这里使用文件名作为标识符）、来源类型 (`local_srt_file`)等。
-4.  这种标准化的数据结构解耦了翻译模块与数据来源，使得 `translator` 模块可以处理任何来源的数据，只要它们遵循此格式。
+### 4. 核心翻译 (Core Translation)
 
-**关键内部函数:**
-- 本步骤的核心逻辑都封装在 `create_pre_translate_json_objects` 单一函数中。它遍历所有片段，为每个片段生成一个包含丰富元数据（如原始时间戳、来源等）的字典，构建出标准化的翻译任务列表。
+-   **主控脚本**: `workflows/translate_from_file.py`
+-   **核心函数**: `llm_utils.translator.execute_translation_async(...)`
+-   **任务与职责**:
+    1.  **异步执行**: 工作流现在是异步的。`execute_translation_async` 函数接收上一步创建的HTML任务列表。
+    2.  **并发调用**: 它使用 `asyncio` 来高效地并发执行对LLM API的调用，同时通过信号量控制并发数，兼顾速度与稳定性。
+    3.  **源语言处理**: 在调用时，`source_lang_code` 参数被设置为 `"auto"`，完全依赖大语言模型的语言检测能力来识别原文语种。
+-   **输出**: 一个包含LLM原始响应（即翻译后的HTML字符串）的结果列表。
 
-### 3. 核心翻译 (Translation)
+### 5. 应用翻译结果 (Result Application)
 
-- **主控脚本**: `workflows/translate_from_file.py`
-- **核心模块**: `llm_utils.translator`
-- **核心函数**: `execute_translation(...)`
+-   **主控脚本**: `workflows/translate_from_file.py`
+-   **核心函数**: `llm_utils.subtitle_processor.update_track_from_html_response(...)`
+-   **任务与职责**:
+    1.  **循环与解析**: 主控脚本遍历翻译结果列表。对于每个批次的已翻译HTML，调用 `update_track_from_html_response`。
+    2.  **数据就地更新**: 该函数使用 `BeautifulSoup` 解析HTML，通过 `data-id` 属性将译文精确地匹配回内存中的 `SubtitleTrack` 对象，并更新相应 `SubtitleSegment` 的 `translated_text` 字段。
+-   **结果**: 此步骤完成后，`SubtitleTrack` 对象已成为一个包含原文和译文的完整数据体。
 
-**任务与职责**:
-1.  接收标准化的"待翻译JSON对象"列表。
-2.  **注意**: 此处调用的是同步版本的 `execute_translation`，与EPUB工作流的 `_async` 版本不同。它通常用于处理数据量较小的任务。
-3.  它负责构建Prompt、调用LLM API，并解析返回的结果。
-4.  返回一个包含翻译结果的JSON对象列表。
+### 6. 后处理与生成 (Postprocessing & Generation)
 
-**关键内部函数:**
-- 此工作流使用的 `execute_translation` 是一个同步的包装器，其内部最终也会调用 `Translator` 类和 `build_prompt_from_template` 来完成核心的翻译任务，但它是一次性的、阻塞式的调用，不涉及 `asyncio` 并发。
-
-### 4. 后处理与生成 (Postprocessing)
-
-- **主控脚本**: `workflows/translate_from_file.py`
-- **核心模块**: `format_converters.postprocessing`
-- **核心函数**: `generate_post_processed_srt(translated_json_objects, logger)`
-
-**任务与职责**:
-1.  接收翻译后的JSON对象列表。
-2.  这个函数是保证最终输出文件可读性的关键。它包含了一系列复杂的后处理逻辑，例如：
-    *   根据中英文标点和词语间距，智能地调整每行字幕的长度，避免出现过长或过短的行。
-    *   确保字幕的显示时间与内容长度相匹配。
-    *   重新计算时间戳，生成格式规范的SRT时间码。
-3.  最终，函数返回一个完整的、可以直接写入文件的SRT格式字符串。
-4.  主控脚本调用 `common_utils.file_helpers.save_to_file` 将此字符串保存为最终的 `.srt` 文件。
+-   **主控脚本**: `workflows/translate_from_file.py`
+-   **核心函数**: `format_converters.postprocessing.generate_post_processed_srt(...)`
+-   **任务与职责**:
+    1.  **输入变更**: `generate_post_processed_srt` 函数现在接收一个 `SubtitleTrack` 对象作为输入，而不是之前临时的JSON列表。
+    2.  **生成SRT内容**: 它调用内部复杂的后处理逻辑（如`_process_one_segment_hybrid` 和 `_wrap_text`），对译文进行智能拆分、计时和换行，以生成格式优美、适合播放的SRT内容。
+    3.  **文件保存**: 主控脚本接收到最终的SRT字符串后，调用 `common_utils.file_helpers.save_to_file` 将其写入磁盘，完成整个工作流。
 
 **关键内部函数:**
 - `_process_one_segment_hybrid(...)`: 后处理的核心，采用混合策略。它首先按对话符 `-` 进行分割，对分割后的部分平均分配时间；然后对每个部分再按标点符号进行更细的分割，并按比例分配时间。
