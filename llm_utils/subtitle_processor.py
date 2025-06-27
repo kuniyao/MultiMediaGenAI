@@ -2,7 +2,7 @@ from format_converters.book_schema import SubtitleTrack, SubtitleSegment
 import html
 from bs4 import BeautifulSoup
 import logging
-from typing import List, Callable, Dict, Any
+from typing import List, Callable, Dict, Any, Union
 import config
 
 # ==============================================================================
@@ -83,54 +83,76 @@ def create_batched_tasks(
 # ==============================================================================
 
 def _serialize_subtitle_segment(segment: SubtitleSegment) -> str:
-    """序列化单个SubtitleSegment为HTML字符串，不再包含data-id。"""
+    """序列化单个SubtitleSegment为HTML字符串，包含data-id。"""
     escaped_text = html.escape(segment.source_text)
-    # 我们不再依赖ID，但保留其他元数据可能对调试有用
     return (
-        f'<div class="segment" data-start="{segment.start}" data-end="{segment.end}">'
+        f'<div class="segment" data-id="{segment.id}" data-start="{segment.start}" data-end="{segment.end}">'
         f'<p>{escaped_text}</p>'
         f'</div>'
     )
 
-def subtitle_track_to_html_tasks(track: SubtitleTrack, logger: logging.Logger) -> list[dict]:
+def subtitle_track_to_html_tasks(input_data: Union[SubtitleTrack, List[SubtitleSegment]], logger: logging.Logger, base_id: str) -> list[dict]:
     """
-    将 SubtitleTrack 转换为分批的、适合LLM的HTML任务列表。
+    将 SubtitleTrack 或 SubtitleSegment 列表转换为分批的、适合LLM的HTML任务列表。
+    
+    Args:
+        input_data: SubtitleTrack 对象或 SubtitleSegment 对象的列表。
+        logger: 日志记录器。
+        base_id: 用于生成任务ID的基础ID (例如 video_id 或 filename)。
+
+    Returns:
+        一个翻译任务的列表。
     """
     effective_input_limit = config.OUTPUT_TOKEN_LIMIT / config.LANGUAGE_EXPANSION_FACTOR
     target_token_per_chunk = int(effective_input_limit * config.SAFETY_MARGIN)
     logger.info(f"Target tokens per subtitle batch calculated: {target_token_per_chunk}")
 
+    items_to_batch: List[SubtitleSegment]
+    effective_base_id: str
+
+    if isinstance(input_data, SubtitleTrack):
+        items_to_batch = input_data.segments
+        effective_base_id = input_data.video_id  # Use video_id from track if available
+    elif isinstance(input_data, List):
+        items_to_batch = input_data
+        effective_base_id = base_id  # Use the provided base_id for lists of segments
+    else:
+        raise TypeError("input_data must be a SubtitleTrack or a List[SubtitleSegment]")
+
     return create_batched_tasks(
-        items=track.segments,
+        items=items_to_batch,
         serialize_func=_serialize_subtitle_segment,
         task_type_name="html_subtitle_batch",
-        base_id=track.video_id,
+        base_id=effective_base_id,
         logger=logger,
         batch_size_limit_tokens=target_token_per_chunk
     )
 
 def update_track_from_html_response(
-    original_segments_in_batch: List[SubtitleSegment],
+    subtitle_track: SubtitleTrack,
     translated_html: str,
     logger: logging.Logger
 ) -> int:
     """
-    使用LLM返回的已翻译HTML内容，按顺序更新原始的SubtitleSegment对象列表。
+    使用LLM返回的已翻译HTML内容，通过data-id更新SubtitleTrack中的SubtitleSegment对象。
     采用三步走策略来提取翻译文本，以提高健壮性。
     """
     soup = BeautifulSoup(translated_html, 'html.parser')
     translated_divs = soup.find_all('div', class_='segment')
 
-    if len(translated_divs) != len(original_segments_in_batch):
-        logger.warning(
-            f"Mismatch in segment count for batch. "
-            f"Original: {len(original_segments_in_batch)}, "
-            f"Translated: {len(translated_divs)}. "
-            f"Will attempt to update based on sequence, but results may be inaccurate."
-        )
-
     updated_count = 0
-    for original_segment, translated_div in zip(original_segments_in_batch, translated_divs):
+    for translated_div in translated_divs:
+        segment_id = translated_div.get('data-id')
+        if not segment_id:
+            logger.warning(f"Translated div missing data-id: {translated_div}. Skipping update for this segment.")
+            continue
+
+        # Find the corresponding segment in the original track
+        target_segment = next((s for s in subtitle_track.segments if s.id == segment_id), None)
+        if not target_segment:
+            logger.warning(f"No matching segment found for data-id: {segment_id}. Skipping update.")
+            continue
+
         translated_text = ""
         
         # 1. 首选路径：尝试获取 <p> 标签的文本
@@ -143,18 +165,18 @@ def update_track_from_html_response(
             if div_text:
                 translated_text = div_text
                 logger.info(
-                    f"Found translation in <div> for original text: '{original_segment.source_text}'. "
+                    f"Found translation in <div> for original text: '{target_segment.source_text}'. "
                     f"Recovered text: '{translated_text}'"
                 )
             else:
                 # 3. 最终路径：如果两者都失败，则记录警告
                 logger.warning(
-                    f"No translation found in <p> or <div> for original text: '{original_segment.source_text}'. "
+                    f"No translation found in <p> or <div> for original text: '{target_segment.source_text}'. "
                     f"Updating with empty string."
                 )
         
-        original_segment.translated_text = translated_text
+        target_segment.translated_text = translated_text
         updated_count += 1
         
-    logger.debug(f"Successfully updated {updated_count} segments in the current batch by sequence.")
+    logger.debug(f"Successfully updated {updated_count} segments in the current batch by data-id.")
     return updated_count

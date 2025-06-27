@@ -10,6 +10,10 @@ from dotenv import load_dotenv
 import asyncio
 from typing import Dict, Optional, Any
 
+class ModelInitializationError(Exception):
+    """Custom exception for errors during LLM model initialization."""
+    pass
+
 # 導入我們新的通用prompt構建器
 from .prompt_builder import build_prompt_from_template
 
@@ -22,7 +26,7 @@ def get_model_client(logger=None, generation_config_overrides: dict | None = Non
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         logger.error("GEMINI_API_KEY not found in environment variables.")
-        return None
+        raise ModelInitializationError("GEMINI_API_KEY not found in environment variables.")
     
     try:
         # 類型檢查工具可能不認識 configure，但運行時是正確的
@@ -44,21 +48,41 @@ def get_model_client(logger=None, generation_config_overrides: dict | None = Non
         return model
     except Exception as e:
         logger.error(f"Failed to initialize Gemini model client: {e}", exc_info=True)
-        return None
+        raise ModelInitializationError(f"Failed to initialize Gemini model client: {e}")
 
 class Translator:
-    def __init__(self, logger=None, prompts: Optional[Dict] = None):
+    def __init__(self, logger: Optional[logging.Logger] = None):
         self.logger = logger if logger else logging.getLogger(__name__)
-        self.prompts = prompts if prompts else {}
         self.model = self._initialize_model()
+        self.prompts = self._load_prompts()
 
     def _initialize_model(self):
-        # 根據任務類型可能需要不同的 client，這裡暫時簡化
-        # 對於 split_part 任務，我們需要的是 text/plain
-        # 對於 json_batch 任務，我們需要的是 application/json
-        # 暫時使用一個通用的，如果後續 API 嚴格要求，需要調整
-        model_client = get_model_client(self.logger)
-        return model_client
+        try:
+            model_client = get_model_client(self.logger)
+            if model_client is None:
+                raise ModelInitializationError("get_model_client returned None without raising an error.")
+            return model_client
+        except ModelInitializationError as e:
+            self.logger.critical(f"Failed to initialize LLM model: {e}")
+            raise  # Re-raise the exception to prevent Translator from being instantiated with a bad model
+
+    def _load_prompts(self) -> Dict:
+        """Loads prompts from prompts.json."""
+        try:
+            prompts_path = project_root / 'prompts.json'
+            with open(prompts_path, 'r', encoding='utf-8') as f:
+                prompts = json.load(f)
+            self.logger.debug(f"Successfully loaded prompts from {prompts_path}")
+            return prompts
+        except FileNotFoundError:
+            self.logger.critical(f"prompts.json not found at {prompts_path}. Please ensure the file exists.")
+            raise
+        except json.JSONDecodeError as e:
+            self.logger.critical(f"Error decoding prompts.json: {e}")
+            raise
+        except Exception as e:
+            self.logger.critical(f"An unexpected error occurred while loading prompts: {e}", exc_info=True)
+            raise
 
     async def _call_gemini_api_async(self, messages: list, log_file_path: str | None, task_id: str, semaphore: asyncio.Semaphore) -> str | None:
         async with semaphore:
@@ -66,16 +90,28 @@ class Translator:
                 self.logger.error(f"Model is not initialized. Cannot call API for task {task_id}.")
                 return None
             
-            try:
-                self.logger.debug(f"Requesting translation for task {task_id}...")
-                # 注意：現在傳遞的是一個 messages 列表
-                response = await self.model.generate_content_async(messages, request_options={'timeout': 300})
-                raw_text = response.text
-                self.logger.debug(f"Received response for task {task_id}.")
-            except Exception as e:
-                self.logger.error(f"Error calling Gemini API for task {task_id}: {e}", exc_info=True)
-                # ... (錯誤處理保持不變)
-                return None
+            MAX_RETRIES = 5
+            INITIAL_BACKOFF_SECONDS = 2
+            
+            for attempt in range(MAX_RETRIES):
+                try:
+                    self.logger.debug(f"Requesting translation for task {task_id} (Attempt {attempt + 1}/{MAX_RETRIES})...")
+                    response = await self.model.generate_content_async(messages, request_options={'timeout': 300})
+                    raw_text = response.text
+                    self.logger.debug(f"Received response for task {task_id} on attempt {attempt + 1}.")
+                    return raw_text
+                except (genai.APIError, asyncio.TimeoutError) as e:
+                    self.logger.warning(f"API error for task {task_id} on attempt {attempt + 1}: {e}")
+                    if attempt < MAX_RETRIES - 1:
+                        backoff_time = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
+                        self.logger.info(f"Retrying task {task_id} in {backoff_time} seconds...")
+                        await asyncio.sleep(backoff_time)
+                    else:
+                        self.logger.error(f"All {MAX_RETRIES} attempts failed for task {task_id}: {e}", exc_info=True)
+                        return None
+                except Exception as e:
+                    self.logger.error(f"An unexpected error occurred for task {task_id}: {e}", exc_info=True)
+                    return None
             
             if log_file_path and raw_text:
                 with open(log_file_path, 'a', encoding='utf-8') as f:
@@ -107,21 +143,32 @@ class Translator:
                 "target_lang": target_lang
             }
 
-            if task_type == 'json_batch':
-                system_prompt_template = self.prompts.get('json_batch_system_prompt')
-                user_prompt_template = self.prompts.get('json_batch_user_prompt')
-                variables["json_task_string"] = task['text_to_translate']
-            elif task_type == 'split_part':
-                system_prompt_template = self.prompts.get('html_split_part_system_prompt')
-                user_prompt_template = self.prompts.get('html_split_part_user_prompt')
-                variables["html_content"] = task['text_to_translate']
-            elif task_type == 'html_subtitle_batch':
-                system_prompt_template = self.prompts.get('html_subtitle_system_prompt')
-                user_prompt_template = self.prompts.get('html_subtitle_user_prompt')
-                variables["html_content"] = task['text_to_translate']
-            else:
+            prompt_config = {
+                'json_batch': {
+                    'system': self.prompts.get('json_batch_system_prompt'),
+                    'user': self.prompts.get('json_batch_user_prompt'),
+                    'var_name': "json_task_string"
+                },
+                'split_part': {
+                    'system': self.prompts.get('html_split_part_system_prompt'),
+                    'user': self.prompts.get('html_split_part_user_prompt'),
+                    'var_name': "html_content"
+                },
+                'html_subtitle_batch': {
+                    'system': self.prompts.get('html_subtitle_system_prompt'),
+                    'user': self.prompts.get('html_subtitle_user_prompt'),
+                    'var_name': "html_content"
+                }
+            }
+
+            config_for_type = prompt_config.get(task_type)
+            if not config_for_type:
                 self.logger.warning(f"Unknown task type '{task_type}' for task ID {task_id}. Skipping.")
                 continue
+
+            system_prompt_template = config_for_type['system']
+            user_prompt_template = config_for_type['user']
+            variables[config_for_type['var_name']] = task['text_to_translate']
 
             prompt_messages = build_prompt_from_template(
                 system_prompt_template,
@@ -160,17 +207,16 @@ class Translator:
         return translated_results
 
 async def execute_translation_async(
-    tasks_to_translate: list,  # <--- 改回通用参数名
+    tasks_to_translate: list, 
     source_lang_code: str, 
     target_lang: str, 
-    video_specific_output_path: str | None = None, 
+    raw_llm_log_dir: str | None = None, 
     logger: logging.Logger | None = None,
     concurrency: int = 5,
-    prompts: Optional[Dict] = None,
     glossary: Optional[Dict[str, str]] = None
-) -> list | None: # <--- 返回通用的列表
+) -> list | None:
     logger_to_use = logger if logger else logging.getLogger(__name__)
-    translator = Translator(logger=logger_to_use, prompts=prompts)
+    translator = Translator(logger=logger_to_use)
 
     logger_to_use.info(f"Starting async translation for {len(tasks_to_translate)} tasks from '{source_lang_code}' to '{target_lang}'...")
     
@@ -179,7 +225,7 @@ async def execute_translation_async(
         chapter_tasks=tasks_to_translate,
         source_lang_code=source_lang_code,
         target_lang=target_lang,
-        output_path=video_specific_output_path,
+        output_path=raw_llm_log_dir,
         concurrency_limit=concurrency,
         glossary=glossary
     )

@@ -53,23 +53,22 @@ python workflows/translate_epub.py "/path/to/your/book.epub" --target_lang "zh-C
 - **`--glossary`**: (可选) 自定义术语表的JSON文件路径。
 
 
-#### 翻译 YouTube 视频
+#### 翻译字幕 (YouTube 视频或本地 SRT 文件)
 
 ```bash
-python workflows/translate_youtube_video.py "YOUTUBE_VIDEO_URL_OR_ID" --target_lang "zh-CN"
+python run_translation.py "YOUTUBE_VIDEO_URL_OR_LOCAL_SRT_PATH" --target_lang "zh-CN"
 ```
 
-#### 翻译本地 SRT 文件
+- **`YOUTUBE_VIDEO_URL_OR_LOCAL_SRT_PATH`**: (必需) 可以是 YouTube 视频的 URL 或本地 `.srt` 文件的完整路径。
+- **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
+- **`--output_dir`**: (可选) 输出文件的根目录，默认为 `GlobalWorkflowOutputs`。
+- **`--log_level`**: (可选) 日志级别，默认为 `INFO`。
 
-```bash
-python workflows/translate_from_file.py "/path/to/your/subtitle.srt" --target_lang "zh-CN"
-```
-
-所有生成的文件，包括日志和翻译结果，将被保存在与源文件相同的目录中。
+所有生成的文件，包括翻译结果和任务日志，将被保存在 `GlobalWorkflowOutputs` 目录下，并按视频标题或文件名创建子目录。
 
 ## 🔧 工作流详解
 
-本项目的架构实现了核心处理逻辑的模块化。`workflows/` 目录下的脚本负责编排任务，而具体的执行逻辑则由 `llm_utils`, `format_converters` 等工具模块提供。
+本项目的架构实现了核心处理逻辑的模块化。`workflows/` 目录下的 `orchestrator.py` 脚本负责编排任务，而具体的执行逻辑则由 `llm_utils`, `format_converters` 等工具模块提供。
 
 ### EPUB 翻译工作流
 
@@ -113,28 +112,37 @@ graph TD;
     D3 --> E;
 ```
 
-### 字幕翻译工作流
+### 统一字幕翻译工作流
 
-所有字幕类工作流（YouTube, 本地SRT文件）共享一套预处理、翻译和后处理逻辑。
+所有字幕类工作流（YouTube, 本地SRT文件）现在都通过 `run_translation.py` 统一入口，并由 `workflows/orchestrator.py` 协调。更详细的工作流说明请参阅 [统一字幕翻译工作流文档](docs/subtitle_translation_workflow.md)。
 
 ```mermaid
 graph TD;
     subgraph Input [输入]
-        A[YouTube 链接]
-    end
-    subgraph Processing [处理流程]
-        B["获取字幕并构建 SubtitleTrack 对象"]
-        C["转换为 HTML 格式进行翻译<br>(保留时间戳等元数据)"]
-        D["更新 SubtitleTrack 对象并生成文件"]
-    end
-    subgraph Output [输出]
-        E[".srt 字幕文件"]
-        F[".md 双语对照文件"]
+        A[本地 .srt 文件 或 YouTube 链接/ID]
     end
 
-    A --> B --> C --> D;
-    D --> E;
-    D --> F;
+    subgraph Orchestration [统一协调]
+        O1[run_translation.py]
+        O2[workflows/orchestrator.py]
+    end
+
+    subgraph Processing [处理流程]
+        B["<b>1. 數據源獲取片段</b><br>(data_sources.LocalFileSource 或 data_sources.YouTubeSource)"]
+        C["<b>2. 构建 SubtitleTrack 数据对象</b><br>(orchestrator)"]
+        D["<b>3. 将轨道转换为批量HTML任务</b><br>(llm_utils.subtitle_processor)"]
+        E["<b>4. 并发翻译HTML任务</b><br>(llm_utils.translator)"]
+        F["<b>5. 将HTML结果更新回轨道</b><br>(llm_utils.subtitle_processor)"]
+        G["<b>6. 生成SRT和MD文件内容</b><br>(postprocessing & markdown_handler)"]
+    end
+
+    subgraph Output [输出]
+        H1[翻译后的 .srt 文件]
+        H2[翻译后的 .md 对照文件]
+    end
+
+    A --> O1 --> O2 --> B --> C --> D --> E --> F --> G;
+    G --> H1 & H2;
 ```
 
 ## 📂 项目结构

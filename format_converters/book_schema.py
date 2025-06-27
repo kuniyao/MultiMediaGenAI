@@ -253,3 +253,26 @@ class SubtitleTrack(BaseModel):
     source_type: Literal["manual", "generated", "local_srt_file"]
     segments: List[SubtitleSegment] = Field(default_factory=list)
 
+    @classmethod
+    def from_segments(
+        cls,
+        segments_data: List[Dict[str, Any]],
+        video_id: str,
+        source_lang: str,
+        source_type: Literal["manual", "generated", "local_srt_file"]
+    ) -> SubtitleTrack:
+        """
+        从原始片段数据（字典列表）构建 SubtitleTrack 对象。
+        """
+        subtitle_track = cls(video_id=video_id, source_lang=source_lang, source_type=source_type)
+        for i, seg_data in enumerate(segments_data):
+            subtitle_track.segments.append(
+                SubtitleSegment(
+                    id=f"seg_{i:04d}",
+                    start=seg_data['start'],
+                    end=seg_data.get('end', seg_data['start'] + seg_data.get('duration', 0)),
+                    source_text=seg_data['text']
+                )
+            )
+        return subtitle_track
+

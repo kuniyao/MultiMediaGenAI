@@ -64,3 +64,6 @@ SAFETY_MARGIN = 0.9
 # For other languages, this might be different (e.g., EN -> ES is closer to 1.3).
 # This is a critical parameter to prevent exceeding the model's *output* token limit.
 LANGUAGE_EXPANSION_FACTOR = 3.0
+
+# Logging Configuration
+LOGS_DIR = "logs"

@@ -59,48 +59,92 @@ class TranslationOrchestrator:
             # 2. Create SubtitleTrack object
             metadata = self.data_source.get_metadata()
             track_id = metadata.get("video_id") or metadata.get("filename")
-            subtitle_track = SubtitleTrack(video_id=track_id, source_lang=source_lang, source_type=source_type)
-            for i, seg_data in enumerate(segments):
-                subtitle_track.segments.append(
-                    SubtitleSegment(
-                        id=f"seg_{i:04d}",
-                        start=seg_data['start'],
-                        end=seg_data.get('end', seg_data['start'] + seg_data.get('duration', 0)),
-                        source_text=seg_data['text']
-                    )
-                )
+            subtitle_track = SubtitleTrack.from_segments(
+                segments_data=segments,
+                video_id=track_id,
+                source_lang=source_lang,
+                source_type=source_type
+            )
             logger.info(f"Successfully created SubtitleTrack with {len(subtitle_track.segments)} segments.")
 
-            # 3. Load prompts
-            project_root = Path(__file__).resolve().parent.parent
-            prompts_path = project_root / 'prompts.json'
-            with open(prompts_path, 'r', encoding='utf-8') as f:
-                prompts = json.load(f)
+            # 3. Prompts are now loaded within the Translator class
 
-            # 4. Translate
-            tasks = subtitle_track_to_html_tasks(subtitle_track, logger)
-            results = await execute_translation_async(
-                tasks_to_translate=tasks,
+            # 4. Initial Translation
+            tasks_to_translate = subtitle_track_to_html_tasks(subtitle_track, logger, base_id=track_id)
+            initial_results = await execute_translation_async(
+                tasks_to_translate=tasks_to_translate,
                 source_lang_code=source_lang,
                 target_lang=self.target_lang,
-                video_specific_output_path=str(self.video_output_path),
-                logger=logger,
-                prompts=prompts
+                raw_llm_log_dir=str(self.video_output_path),
+                logger=logger
             )
-            if not results:
-                logger.error("Translation failed. Aborting.")
+            if not initial_results:
+                logger.error("Initial translation failed or returned no results. Aborting.")
                 return
 
-            # 5. Update track from results
-            for result in results:
-                original_segments = result.get("source_data", {}).get("original_segments", [])
+            # 5. Update track from initial results
+            for result in initial_results:
                 update_track_from_html_response(
-                    original_segments_in_batch=original_segments,
+                    subtitle_track=subtitle_track,
                     translated_html=result.get("translated_text", ""),
                     logger=logger
                 )
 
-            # 6. Save final SRT file
+            # 6. Retry mechanism for untranslated segments
+            MAX_RETRY_ROUNDS = 3
+            RETRY_DELAY_SECONDS = 5
+            
+            for retry_round in range(MAX_RETRY_ROUNDS):
+                untranslated_segments = [
+                    seg for seg in subtitle_track.segments
+                    if not seg.translated_text or seg.translated_text.startswith("[TRANSLATION_FAILED]")
+                ]
+
+                if not untranslated_segments:
+                    logger.info(f"All segments translated after {retry_round + 1} rounds.")
+                    break
+                
+                logger.warning(f"Found {len(untranslated_segments)} untranslated segments after round {retry_round + 1}. Retrying...")
+
+                # Create new tasks only for untranslated segments
+                retry_tasks = subtitle_track_to_html_tasks(untranslated_segments, logger, base_id=track_id) 
+                
+                if not retry_tasks:
+                    logger.warning("No retry tasks could be generated for untranslated segments. Aborting retry.")
+                    break
+
+                retry_results = await execute_translation_async(
+                    tasks_to_translate=retry_tasks,
+                    source_lang_code=source_lang,
+                    target_lang=self.target_lang,
+                    raw_llm_log_dir=str(self.video_output_path),
+                    logger=logger
+                )
+
+                if retry_results:
+                    for result in retry_results:
+                        update_track_from_html_response(
+                            subtitle_track=subtitle_track,
+                            translated_html=result.get("translated_text", ""),
+                            logger=logger
+                        )
+                else:
+                    logger.warning(f"Retry round {retry_round + 1} yielded no new translations.")
+
+                if retry_round < MAX_RETRY_ROUNDS - 1:
+                    logger.info(f"Waiting {RETRY_DELAY_SECONDS} seconds before next retry round...")
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+            else:
+                final_untranslated_count = len([
+                    seg for seg in subtitle_track.segments
+                    if not seg.translated_text or seg.translated_text.startswith("[TRANSLATION_FAILED]")
+                ])
+                if final_untranslated_count > 0:
+                    logger.error(f"Finished all {MAX_RETRY_ROUNDS} retry rounds. {final_untranslated_count} segments remain untranslated.")
+                else:
+                    logger.info("All segments translated after all retry rounds.")
+
+            # 7. Save final SRT file (original step 6)
             srt_content = generate_post_processed_srt(subtitle_track, logger)
             file_basename = sanitize_filename(metadata.get("title", "translation"))
             srt_path = self.video_output_path / f"{file_basename}_{self.target_lang}.srt"
