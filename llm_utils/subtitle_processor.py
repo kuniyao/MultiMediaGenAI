@@ -6,7 +6,7 @@ from typing import List, Callable, Dict, Any
 import config
 
 # ==============================================================================
-# 1. 通用分批逻辑 (Generic Batching Logic)
+# 1. 通用分批逻辑 (Generic Batching Logic) - 已修改
 # ==============================================================================
 
 def create_batched_tasks(
@@ -15,10 +15,11 @@ def create_batched_tasks(
     task_type_name: str,
     base_id: str,
     logger: logging.Logger,
-    batch_size_limit_tokens: int = 4000  # A reasonable default token limit per batch
+    batch_size_limit_tokens: int = 4000
 ) -> List[Dict]:
     """
     一个通用的函数，用于将项目列表按Token数量智能分批，创建翻译任务。
+    此版本将原始项目对象存储在任务中，以实现更可靠的更新。
 
     Args:
         items: 需要处理的项目列表 (例如 SubtitleSegment 对象)。
@@ -29,58 +30,64 @@ def create_batched_tasks(
         batch_size_limit_tokens: 每个批次的目标Token上限。
 
     Returns:
-        一个翻译任务的列表。
+        一个翻译任务的列表，每个任务都包含原始项目。
     """
     tasks = []
+    current_batch_items = []
     current_batch_html_parts = []
     current_batch_tokens = 0
     batch_index = 1
 
     for item in items:
         item_html = serialize_func(item)
-        # A simple approximation: 3 chars ~ 1 token. This can be refined.
         item_tokens = len(item_html) // 3
 
-        # 如果当前项目加入后会超出限制，并且当前批次不为空，则最终化当前批次
-        if current_batch_html_parts and (current_batch_tokens + item_tokens > batch_size_limit_tokens):
+        if current_batch_items and (current_batch_tokens + item_tokens > batch_size_limit_tokens):
             logger.info(f"Finalizing batch {batch_index} with {current_batch_tokens} tokens.")
-            batch_html_content = "\\n".join(current_batch_html_parts)
+            batch_html_content = "\n".join(current_batch_html_parts)
             tasks.append({
                 "llm_processing_id": f"{task_type_name}_{base_id}_part_{batch_index}",
                 "text_to_translate": batch_html_content,
-                "source_data": {"type": task_type_name, "id": base_id}
+                "source_data": {
+                    "type": task_type_name,
+                    "id": base_id,
+                    "original_segments": current_batch_items  # 存储原始对象
+                }
             })
-            # 重置批次
+            current_batch_items = []
             current_batch_html_parts = []
             current_batch_tokens = 0
             batch_index += 1
 
-        # 将当前项目添加到批次中
+        current_batch_items.append(item)
         current_batch_html_parts.append(item_html)
         current_batch_tokens += item_tokens
 
-    # 处理最后一个剩余的批次
-    if current_batch_html_parts:
+    if current_batch_items:
         logger.info(f"Finalizing the last batch {batch_index} with {current_batch_tokens} tokens.")
-        batch_html_content = "\\n".join(current_batch_html_parts)
+        batch_html_content = "\n".join(current_batch_html_parts)
         tasks.append({
             "llm_processing_id": f"{task_type_name}_{base_id}_part_{batch_index}",
             "text_to_translate": batch_html_content,
-            "source_data": {"type": task_type_name, "id": base_id}
+            "source_data": {
+                "type": task_type_name,
+                "id": base_id,
+                "original_segments": current_batch_items  # 存储最后一个批次的原始对象
+            }
         })
 
     return tasks
 
 # ==============================================================================
-# 2. 字幕专用处理器 (Subtitle Specific Processors)
+# 2. 字幕专用处理器 (Subtitle Specific Processors) - 已修改
 # ==============================================================================
 
 def _serialize_subtitle_segment(segment: SubtitleSegment) -> str:
-    """序列化单个SubtitleSegment为HTML字符串。"""
+    """序列化单个SubtitleSegment为HTML字符串，不再包含data-id。"""
     escaped_text = html.escape(segment.source_text)
+    # 我们不再依赖ID，但保留其他元数据可能对调试有用
     return (
-        f'<div class="segment" data-id="{segment.id}" '
-        f'data-start="{segment.start}" data-end="{segment.end}">'
+        f'<div class="segment" data-start="{segment.start}" data-end="{segment.end}">'
         f'<p>{escaped_text}</p>'
         f'</div>'
     )
@@ -88,10 +95,7 @@ def _serialize_subtitle_segment(segment: SubtitleSegment) -> str:
 def subtitle_track_to_html_tasks(track: SubtitleTrack, logger: logging.Logger) -> list[dict]:
     """
     将 SubtitleTrack 转换为分批的、适合LLM的HTML任务列表。
-    现在调用通用的分批函数。
     """
-    # 从配置计算批次大小
-    # (与 book_processor.py 中的逻辑保持一致)
     effective_input_limit = config.OUTPUT_TOKEN_LIMIT / config.LANGUAGE_EXPANSION_FACTOR
     target_token_per_chunk = int(effective_input_limit * config.SAFETY_MARGIN)
     logger.info(f"Target tokens per subtitle batch calculated: {target_token_per_chunk}")
@@ -105,44 +109,52 @@ def subtitle_track_to_html_tasks(track: SubtitleTrack, logger: logging.Logger) -
         batch_size_limit_tokens=target_token_per_chunk
     )
 
-def update_track_from_html_response(track: SubtitleTrack, translated_html: str, logger: logging.Logger) -> int:
+def update_track_from_html_response(
+    original_segments_in_batch: List[SubtitleSegment],
+    translated_html: str,
+    logger: logging.Logger
+) -> int:
     """
-    使用LLM返回的已翻译HTML内容来更新SubtitleTrack对象。
-    
-    Args:
-        track: 原始的SubtitleTrack对象，其segments将被就地更新。
-        translated_html: LLM返回的包含翻译文本的HTML字符串。
-        logger: 用于记录日志的Logger对象。
-
-    Returns:
-        一个整数，代表此批次中成功更新的片段数量。
+    使用LLM返回的已翻译HTML内容，按顺序更新原始的SubtitleSegment对象列表。
+    采用三步走策略来提取翻译文本，以提高健壮性。
     """
     soup = BeautifulSoup(translated_html, 'html.parser')
-    segments = soup.find_all('div', class_='segment')
-    
-    track_segments_map = {seg.id: seg for seg in track.segments}
-    
+    translated_divs = soup.find_all('div', class_='segment')
+
+    if len(translated_divs) != len(original_segments_in_batch):
+        logger.warning(
+            f"Mismatch in segment count for batch. "
+            f"Original: {len(original_segments_in_batch)}, "
+            f"Translated: {len(translated_divs)}. "
+            f"Will attempt to update based on sequence, but results may be inaccurate."
+        )
+
     updated_count = 0
-    
-    for segment_div in segments:
-        seg_id = segment_div.get('data-id')
-        if not seg_id:
-            logger.warning(f"发现一个没有 data-id 的 segment div，跳过: {segment_div}")
-            continue
-            
-        p_tag = segment_div.find('p')
-        if not p_tag:
-            logger.warning(f"在 data-id={seg_id} 的 segment 中没有找到 <p> 标签，跳过。")
-            continue
-            
-        translated_text = p_tag.get_text()
+    for original_segment, translated_div in zip(original_segments_in_batch, translated_divs):
+        translated_text = ""
         
-        if seg_id in track_segments_map:
-            track_segments_map[seg_id].translated_text = translated_text
-            updated_count += 1
+        # 1. 首选路径：尝试获取 <p> 标签的文本
+        p_tag = translated_div.find('p')
+        if p_tag and p_tag.get_text(strip=True):
+            translated_text = p_tag.get_text(strip=True)
         else:
-            logger.warning(f"在原始 SubtitleTrack 中找不到ID为 {seg_id} 的片段，无法更新翻译。")
-            
-    logger.debug(f"从当前HTML批次中成功解析并更新了 {updated_count} 个字幕片段。")
+            # 2. 备用路径：如果<p>不存在或为空，尝试获取整个<div>的直接文本
+            div_text = translated_div.get_text(strip=True)
+            if div_text:
+                translated_text = div_text
+                logger.info(
+                    f"Found translation in <div> for original text: '{original_segment.source_text}'. "
+                    f"Recovered text: '{translated_text}'"
+                )
+            else:
+                # 3. 最终路径：如果两者都失败，则记录警告
+                logger.warning(
+                    f"No translation found in <p> or <div> for original text: '{original_segment.source_text}'. "
+                    f"Updating with empty string."
+                )
         
-    return updated_count 
+        original_segment.translated_text = translated_text
+        updated_count += 1
+        
+    logger.debug(f"Successfully updated {updated_count} segments in the current batch by sequence.")
+    return updated_count
