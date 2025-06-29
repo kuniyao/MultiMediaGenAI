@@ -63,8 +63,8 @@ def merge_segments_intelligently(transcript_segments, logger=None):
     current_sentence_buffer = ""
 
     # Define a maximum character limit for a merged segment
-    MAX_MERGED_SEGMENT_CHARS = 1500 # Adjust this value as needed
-    MAX_MERGED_SEGMENT_DURATION = 20 # Max duration in seconds for a merged segment
+    MAX_MERGED_SEGMENT_CHARS = 250 # Adjust this value as needed
+    MAX_MERGED_SEGMENT_DURATION = 15 # Max duration in seconds for a merged segment
 
     def _add_final_segment(text_to_add, start_char_idx, end_char_idx):
         sentence_text = text_to_add.strip()
@@ -99,59 +99,49 @@ def merge_segments_intelligently(transcript_segments, logger=None):
         is_natural_sentence_end = (len(stripped_part) == 1 and stripped_part in '.?!')
         is_last_part = (i == len(sentences) - 1)
 
-        # Force split if buffer is too long, even if not a natural sentence end
-        while len(current_sentence_buffer) >= MAX_MERGED_SEGMENT_CHARS or \
-              (current_sentence_buffer and (char_map[min(current_char_offset_in_full_text + len(current_sentence_buffer) - 1, len(char_map) - 1)] - char_map[current_char_offset_in_full_text]) > MAX_MERGED_SEGMENT_DURATION):
-            
-            # Try to find a natural split point (e.g., space) within the limit
-            split_point = -1
-            if len(current_sentence_buffer) > MAX_MERGED_SEGMENT_CHARS:
-                split_point = current_sentence_buffer.rfind(' ', 0, MAX_MERGED_SEGMENT_CHARS)
-            
-            # If no space found or splitting by duration, find a reasonable split point
-            if split_point == -1:
-                # Fallback: find a split point that respects duration or just force split
-                temp_end_char_idx = current_char_offset_in_full_text + MAX_MERGED_SEGMENT_CHARS - 1
-                if temp_end_char_idx >= len(char_map):
-                    split_point = len(current_sentence_buffer)
-                else:
-                    target_time = char_map[current_char_offset_in_full_text] + MAX_MERGED_SEGMENT_DURATION
-                    # Find the character index closest to target_time
-                    time_split_idx = -1
-                    for k in range(current_char_offset_in_full_text, len(char_map)):
-                        if char_map[k] >= target_time:
-                            time_split_idx = k
-                            break
-                    if time_split_idx == -1: # If target_time is beyond available char_map
-                        time_split_idx = len(char_map) - 1
-                    
-                    split_point = time_split_idx - current_char_offset_in_full_text
-                    if split_point <= 0: # Ensure split_point is at least 1
-                        split_point = 1
-                    
-                    # Try to find a space near the time_split_idx
-                    if split_point < len(current_sentence_buffer):
-                        temp_split_point = current_sentence_buffer.rfind(' ', 0, split_point + 10) # Look a bit further for a space
-                        if temp_split_point != -1 and temp_split_point > split_point - 50: # Only use if reasonably close
-                            split_point = temp_split_point
-                        elif split_point < len(current_sentence_buffer) -1: # Ensure split point is not at the very end
-                            split_point = current_sentence_buffer.find(' ', split_point)
-                            if split_point == -1: # If no space after, just use the calculated point
-                                split_point = len(current_sentence_buffer)
+        # Force split if buffer is too long or too long in duration
+        buffer_len = len(current_sentence_buffer)
+        if buffer_len > 0:
+            start_idx = min(current_char_offset_in_full_text, len(char_map) - 1)
+            end_idx = min(current_char_offset_in_full_text + buffer_len - 1, len(char_map) - 1)
+            buffer_duration = char_map[end_idx] - char_map[start_idx]
+        else:
+            buffer_duration = 0
 
-            if split_point <= 0 or split_point > len(current_sentence_buffer):
-                split_point = len(current_sentence_buffer) # Fallback to full buffer if no valid split point found
+        while buffer_len >= MAX_MERGED_SEGMENT_CHARS or buffer_duration > MAX_MERGED_SEGMENT_DURATION:
+            # Find a practical split point
+            # Default to the max character limit
+            split_point = MAX_MERGED_SEGMENT_CHARS
 
-            segment_text = current_sentence_buffer[:split_point]
+            # Try to find a space before the character limit to avoid splitting words
+            last_space = current_sentence_buffer.rfind(' ', 0, split_point)
+            if last_space != -1:
+                split_point = last_space
             
+            # If the segment is still too long (no space found), force split
+            segment_text = current_sentence_buffer[:split_point].strip()
+            
+            if not segment_text: # Avoid creating empty segments
+                break
+
             # Calculate character indices for this forced segment
             segment_start_char_idx = current_char_offset_in_full_text
             segment_end_char_idx = segment_start_char_idx + len(segment_text) - 1
             
             _add_final_segment(segment_text, segment_start_char_idx, segment_end_char_idx)
             
+            # Update buffer and offsets for the next loop iteration
             current_sentence_buffer = current_sentence_buffer[split_point:].strip()
-            current_char_offset_in_full_text = segment_end_char_idx + 1 # Update offset for remaining buffer
+            current_char_offset_in_full_text += len(segment_text) + (len(current_sentence_buffer) - len(current_sentence_buffer.lstrip())) # Account for removed text and leading spaces
+
+            # Recalculate length and duration for the while condition
+            buffer_len = len(current_sentence_buffer)
+            if buffer_len > 0:
+                start_idx = min(current_char_offset_in_full_text, len(char_map) - 1)
+                end_idx = min(current_char_offset_in_full_text + buffer_len - 1, len(char_map) - 1)
+                buffer_duration = char_map[end_idx] - char_map[start_idx]
+            else:
+                buffer_duration = 0
 
         # If it's a natural sentence end or the last part, add the remaining buffer as a segment
         if is_natural_sentence_end or is_last_part:
