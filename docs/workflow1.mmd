@@ -1,0 +1,35 @@
+graph TD;
+    subgraph Input [输入]
+        A[EPUB 文件]
+    end
+
+    subgraph Parsing [1. 解析阶段]
+        direction LR
+        B1["epub_to_book<br>(format_converters.epub_parser)"]
+    end
+
+    subgraph Extraction [2. 内容提取]
+        direction LR
+        C1["extract_translatable_chapters<br>(llm_utils.book_processor)"]
+    end
+    
+    subgraph Translation [3. 核心翻译]
+        direction LR
+        D1["execute_translation_async<br>(llm_utils.translator)"]
+    end
+
+    subgraph Application [4. 结果应用]
+        direction LR
+        E1["apply_translations_to_book<br>(llm_utils.book_processor)"]
+    end
+
+    subgraph Writing [5. 生成阶段]
+        direction LR
+        F1["book_to_epub<br>(format_converters.epub_writer)"]
+    end
+
+    subgraph Output [输出]
+        G[翻译后的新 EPUB 文件]
+    end
+
+    A --> B1 -- Book Object --> C1 -- 翻译任务列表 --> D1 -- 翻译结果 --> E1 -- 翻译后的 Book Object --> F1 --> G;

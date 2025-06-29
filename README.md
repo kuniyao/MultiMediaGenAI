@@ -41,34 +41,30 @@ GEMINI_API_KEY="your-gemini-api-key-here"
 
 ### 3. 运行工作流
 
-#### 翻译 EPUB 电子书 (主要工作流)
+#### 运行翻译工作流
+
+所有翻译工作流现在都通过 `translate.py` 作为统一入口点。根据您提供的输入类型（YouTube URL、本地字幕文件或 EPUB 文件），脚本将自动选择并执行相应的工作流。
 
 ```bash
-python workflows/translate_epub.py "/path/to/your/book.epub" --target_lang "zh-CN" --concurrency 10
-```
-- **`epub_path`**: (必需) 本地 `.epub` 文件的完整路径。
-- **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
-- **`--concurrency`**: (可选) API请求的并发数，默认为 `10`。
-- **`--prompts`**: (可选) 自定义 Prompts 的JSON文件路径。
-- **`--glossary`**: (可选) 自定义术语表的JSON文件路径。
-
-
-#### 翻译字幕 (YouTube 视频或本地 SRT 文件)
-
-```bash
-python run_translation.py "YOUTUBE_VIDEO_URL_OR_LOCAL_SRT_PATH" --target_lang "zh-CN"
+python translate.py "YOUR_INPUT_SOURCE" --target_lang "zh-CN" --output_dir "GlobalWorkflowOutputs" [其他可选参数]
 ```
 
-- **`YOUTUBE_VIDEO_URL_OR_LOCAL_SRT_PATH`**: (必需) 可以是 YouTube 视频的 URL 或本地 `.srt` 文件的完整路径。
-- **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
-- **`--output_dir`**: (可选) 输出文件的根目录，默认为 `GlobalWorkflowOutputs`。
-- **`--log_level`**: (可选) 日志级别，默认为 `INFO`。
+-   **`YOUR_INPUT_SOURCE`**: (必需) 可以是：
+    *   YouTube 视频的 URL (例如: `"https://www.youtube.com/watch?v=dQw4w9WgXcQ"`)
+    *   本地 `.srt` 或 `.vtt` 字幕文件的完整路径 (例如: `"/path/to/your/subtitle.srt"`)
+    *   本地 `.epub` 电子书文件的完整路径 (例如: `"/path/to/your/book.epub"`)
+-   **`--target_lang`**: (可选) 目标翻译语言，默认为 `zh-CN`。
+-   **`--output_dir`**: (可选) 所有翻译结果和日志文件的根目录。默认为 `GlobalWorkflowOutputs`。所有生成的文件将保存在此目录下，并按任务（视频标题或文件名）创建子目录。
+-   **`--concurrency`**: (可选) 仅适用于 EPUB 翻译工作流。API 请求的并发数，默认为 `10`。
+-   **`--prompts`**: (可选) 仅适用于 EPUB 翻译工作流。自定义 Prompts 的 JSON 文件路径。
+-   **`--glossary`**: (可选) 仅适用于 EPUB 翻译工作流。自定义术语表的 JSON 文件路径。
+-   **`--log_level`**: (可选) 日志级别，默认为 `INFO`。
 
-所有生成的文件，包括翻译结果和任务日志，将被保存在 `GlobalWorkflowOutputs` 目录下，并按视频标题或文件名创建子目录。
+所有生成的文件，包括翻译结果和任务日志，将被保存在 `--output_dir` 指定的目录下，并按视频标题或文件名创建子目录。
 
 ## 🔧 工作流详解
 
-本项目的架构实现了核心处理逻辑的模块化。`workflows/` 目录下的 `orchestrator.py` 脚本负责编排任务，而具体的执行逻辑则由 `llm_utils`, `format_converters` 等工具模块提供。
+本项目的架构实现了核心处理逻辑的模块化。`translate.py` 作为统一入口，根据输入类型分发到不同的 `workflows/` 编排器，而具体的执行逻辑则由 `llm_utils`, `format_converters` 等工具模块提供。
 
 ### EPUB 翻译工作流
 
@@ -78,6 +74,11 @@ python run_translation.py "YOUTUBE_VIDEO_URL_OR_LOCAL_SRT_PATH" --target_lang "z
 graph TD;
     subgraph Input [输入]
         A[EPUB 文件]
+    end
+
+    subgraph Orchestration [统一协调]
+        O1[translate.py]
+        O2[workflows/epub_orchestrator.py]
     end
 
     subgraph Parsing [1. 解析阶段 - epub_parser.py]
@@ -100,8 +101,8 @@ graph TD;
         D3["打包生成最终的EPUB文件"]
     end
 
-    Input --> Parsing;
-    A --> B1 --> B2 --> B3;
+    Input --> Orchestration --> Parsing;
+    A --> O1 --> O2 --> B1 --> B2 --> B3;
     Parsing -- Book Object --> Processing;
     B3 -- book_obj --> C1 --> C2 --> C3;
     Processing -- Translated Book Object --> Writing;
@@ -114,7 +115,7 @@ graph TD;
 
 ### 统一字幕翻译工作流
 
-所有字幕类工作流（YouTube, 本地SRT文件）现在都通过 `run_translation.py` 统一入口，并由 `workflows/orchestrator.py` 协调。更详细的工作流说明请参阅 [统一字幕翻译工作流文档](docs/subtitle_translation_workflow.md)。
+所有字幕类工作流（YouTube, 本地SRT文件）现在都通过 `translate.py` 统一入口，并由 `workflows/orchestrator.py` 协调。更详细的工作流说明请参阅 [统一字幕翻译工作流文档](docs/subtitle_translation_workflow.md)。
 
 ```mermaid
 graph TD;
@@ -123,7 +124,7 @@ graph TD;
     end
 
     subgraph Orchestration [统一协调]
-        O1[run_translation.py]
+        O1[translate.py]
         O2[workflows/orchestrator.py]
     end
 
@@ -136,12 +137,11 @@ graph TD;
         G["<b>6. 生成SRT和MD文件内容</b><br>(postprocessing & markdown_handler)"]
     end
 
+    A --> O1 --> O2 --> B --> C --> D --> E --> F --> G;
     subgraph Output [输出]
         H1[翻译后的 .srt 文件]
         H2[翻译后的 .md 对照文件]
     end
-
-    A --> O1 --> O2 --> B --> C --> D --> E --> F --> G;
     G --> H1 & H2;
 ```
 
@@ -151,8 +151,8 @@ graph TD;
 - `llm_utils/`: **大语言模型交互**。封装了与LLM API的通信、Prompt构建、并发控制等逻辑。
 - `format_converters/`: **数据转换与处理**。负责文件的解析（EPUB, SRT）、文本的预处理和后处理。
 - `youtube_utils/`: **YouTube数据获取**。封装了所有与YouTube相关的下载和处理逻辑。
-- `common_utils/`: **通用工具库**。存放项目通用的辅助函数（如日志、文件操作）。
-- `outputs/`: **输出目录**。用于存放日志等生成文件（默认行为是在源文件目录生成结果）。
+- `common_utils/`: **通用工具库**。存放项目通用的辅助函数（如日志、文件操作），包括 `output_manager.py` 用于统一管理输出。
+- `GlobalWorkflowOutputs/`: **默认输出目录**。所有翻译结果和任务日志的默认存放位置。
 - `docs/`: **详细设计文档**。存放对主要工作流的详细设计和模块说明。
 
 ## ℹ️ 深入了解

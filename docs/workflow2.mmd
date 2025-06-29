@@ -1,0 +1,19 @@
+graph TD;
+    subgraph Input [输入]
+        A[本地 .srt 文件]
+    end
+
+    subgraph Processing [处理流程]
+        B["<b>1. 加载并合并字幕片段</b><br>(preprocessing.load_and_merge_srt_segments)"]
+        C["<b>2. 构建 SubtitleTrack 数据对象</b><br>(workflow script)"]
+        D["<b>3. 将轨道转换为批量HTML任务</b><br>(llm_utils.subtitle_processor)"]
+        E["<b>4. 并发翻译HTML任务</b><br>(llm_utils.translator)"]
+        F["<b>5. 将HTML结果更新回轨道</b><br>(llm_utils.subtitle_processor)"]
+        G["<b>6. 生成SRT文件内容并保存</b><br>(postprocessing & file_helpers)"]
+    end
+
+    subgraph Output [输出]
+        H[翻译后的 .srt 文件]
+    end
+
+    A --> B --> C --> D --> E --> F --> G --> H;

@@ -10,22 +10,23 @@ from .book_schema import (
     Book, BookMetadata, Chapter, ImageResource, CSSResource,
     AnyBlock
 )
-# 【變更 1】: 導入我們剛剛建立的“合約”
+# 【變更 1】: 導入我們剛剛建立的"合約"
 from .base_converter import BaseInputConverter
 
 
 # 【變更 2】: 類別改名並繼承自 BaseInputConverter
-class EpubInputConverter(BaseInputConverter):
+class EpubParser(BaseInputConverter):
     """
     將EPUB文件解析並將其內容轉換為基於 book_schema 的 Book 物件。
-    這個類別現在履行 BaseInputConverter 的“合約”。
+    這個類別現在履行 BaseInputConverter 的"合約"。
     """
 
-    def __init__(self, epub_path: str):
+    def __init__(self, epub_path: str, logger=None):
         """
         初始化解析器，解壓EPUB文件並找到 .opf 文件。
         """
         self.epub_path = pathlib.Path(epub_path)
+        self.logger = logger
         if not self.epub_path.is_file():
             raise FileNotFoundError(f"EPUB 文件未找到: {self.epub_path}")
 
@@ -84,7 +85,6 @@ class EpubInputConverter(BaseInputConverter):
 
         return opf_path
 
-    # 【變更 3】: 原來的 parse() 方法被改名為 to_book()，以履行合約
     def to_book(self) -> Book:
         """
         執行EPUB文件解析的主方法。
@@ -93,14 +93,17 @@ class EpubInputConverter(BaseInputConverter):
             一个代表EPUB内容的 Book 对象。
         """
         # 第二階段: 解析 .opf 文件，獲取元數據、資源清單和閱讀順序
-        print("正在解析 OPF 文件...")
+        if self.logger:
+            self.logger.info("正在解析 OPF 文件...")
         self._parse_opf()
 
         # 第三階段: 解析每個章節文件，將HTML內容映射到我們的數據模型
-        print("正在解析章節內容...")
+        if self.logger:
+            self.logger.info("正在解析章節內容...")
         self._parse_chapters()
 
-        print("解析完成。")
+        if self.logger:
+            self.logger.info("解析完成。")
         return self.book
 
     def _parse_opf(self):
@@ -340,12 +343,11 @@ class EpubInputConverter(BaseInputConverter):
             self.temp_dir.cleanup()
             print(f"已清理臨時目錄: {self.unzip_dir}")
 
-def epub_to_book(epub_path: str) -> Book:
+def epub_to_book(epub_path: str, logger) -> Book:
     """
-    一個便捷的函數，用於將EPUB文件路徑轉換為 Book 物件。
+    一个辅助函数，用于快速将EPUB文件转换为Book对象。
     """
-
-    # 【變更 4】: 這個頂層輔助函數現在使用我們新的 Converter 類別
-    converter = EpubInputConverter(epub_path)
-    book = converter.to_book()
-    return book
+    # 这里我们实例化新的、符合接口的类
+    parser = EpubParser(epub_path, logger=logger)
+    # 调用符合接口的方法
+    return parser.to_book()

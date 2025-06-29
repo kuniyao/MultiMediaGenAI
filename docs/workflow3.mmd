@@ -1,0 +1,22 @@
+graph TD;
+    subgraph Input [输入]
+        A[YouTube 链接或ID]
+    end
+
+    subgraph Processing [处理流程]
+        B["<b>1. 获取原始字幕 & 标题</b><br>(youtube_utils.data_fetcher)"]
+        B_plus["<b>2. 智能预处理与合并片段</b><br>(format_converters.preprocessing)"]
+        C["<b>3. 构建 SubtitleTrack 数据对象</b><br>(workflow script)"]
+        D["<b>4. 将轨道转换为批量HTML任务</b><br>(llm_utils.subtitle_processor)"]
+        E["<b>5. 并发翻译HTML任务</b><br>(llm_utils.translator)"]
+        F["<b>6. 将HTML结果更新回轨道</b><br>(llm_utils.subtitle_processor)"]
+        G["<b>7. 生成SRT和MD文件内容</b><br>(format_converters.*)"]
+    end
+
+    subgraph Output [输出]
+        H1[翻译后的 .srt 文件]
+        H2[翻译后的 .md 对照文件]
+    end
+
+    A --> B --> B_plus --> C --> D --> E --> F --> G;
+    G --> H1 & H2;

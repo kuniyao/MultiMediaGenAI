@@ -2,7 +2,7 @@
 
 本文档详细描述了 `MultiMediaGenAI` 项目中用于翻译 EPUB 电子书的端到端工作流。
 
-- **执行入口**: `workflows/translate_epub.py`
+- **执行入口**: `translate.py`
 - **核心目标**: 输入一个 `.epub` 文件，输出一个内容被完整翻译、同时保持原始结构和样式的新的 `.epub` 文件。
 
 ---
@@ -15,6 +15,11 @@
 graph TD;
     subgraph Input [输入]
         A[EPUB 文件]
+    end
+
+    subgraph Orchestration [统一协调]
+        O1[translate.py]
+        O2[workflows/epub_orchestrator.py]
     end
 
     subgraph Parsing [1. 解析阶段]
@@ -46,7 +51,10 @@ graph TD;
         G[翻译后的新 EPUB 文件]
     end
 
-    A --> B1 -- Book Object --> C1 -- 翻译任务列表 --> D1 -- 翻译结果 --> E1 -- 翻译后的 Book Object --> F1 --> G;
+    A --> Orchestration;
+    O1 --> O2;
+    O2 --> B1;
+    B1 -- Book Object --> C1 -- 翻译任务列表 --> D1 -- 翻译结果 --> E1 -- 翻译后的 Book Object --> F1 --> G;
 ```
 
 ---
@@ -55,7 +63,7 @@ graph TD;
 
 ### 1. 解析阶段 (Parsing)
 
-- **主控脚本**: `workflows/translate_epub.py`
+- **主控脚本**: `translate.py` (通过 `workflows/epub_orchestrator.py` 协调)
 - **核心模块**: `format_converters.epub_parser`
 - **核心函数**: `epub_to_book(epub_path)`
 
@@ -75,7 +83,7 @@ graph TD;
 
 ### 2. 内容提取 (Extraction)
 
-- **主控脚本**: `workflows/translate_epub.py`
+- **主控脚本**: `translate.py` (通过 `workflows/epub_orchestrator.py` 协调)
 - **核心模块**: `llm_utils.book_processor`
 - **核心函数**: `extract_translatable_chapters(book, logger)`
 
@@ -94,7 +102,7 @@ graph TD;
 
 ### 3. 核心翻译 (Translation)
 
-- **主控脚本**: `workflows/translate_epub.py`
+- **主控脚本**: `translate.py` (通过 `workflows/epub_orchestrator.py` 协调)
 - **核心模块**: `llm_utils.translator`
 - **核心函数**: `Translator.translate_async(...)`
 
@@ -112,7 +120,7 @@ graph TD;
 
 ### 4. 结果应用 (Application)
 
-- **主控脚本**: `workflows/translate_epub.py`
+- **主控脚本**: `translate.py` (通过 `workflows/epub_orchestrator.py` 协调)
 - **核心模块**: `llm_utils.book_processor`
 - **核心函数**: `apply_translations_to_book(original_book, translated_results, logger)`
 
@@ -131,7 +139,7 @@ graph TD;
 
 ### 5. 生成阶段 (Writing)
 
-- **主控脚本**: `workflows/translate_epub.py`
+- **主控脚本**: `translate.py` (通过 `workflows/epub_orchestrator.py` 协调)
 - **核心模块**: `format_converters.epub_writer`
 - **核心函数**: `book_to_epub(book, output_path)`
 

@@ -2,7 +2,7 @@
 
 本文档详细描述了 `MultiMediaGenAI` 项目中用于翻译字幕的统一工作流，支持本地字幕文件（目前主要为 `.srt`）和 YouTube 视频字幕。
 
-- **执行入口**: `run_translation.py` (统一入口点)
+- **执行入口**: `translate.py` (统一入口点)
 - **核心目标**: 输入一个本地 `.srt` 文件路径或 YouTube 视频链接/ID，输出翻译后的、经过优化排版的字幕文件（`.srt` 和 `.md` 格式）。
 - **核心数据结构**: `format_converters.book_schema.SubtitleTrack`
 
@@ -19,7 +19,7 @@ graph TD;
     end
 
     subgraph Orchestration [统一协调]
-        O1[run_translation.py]
+        O1[translate.py]
         O2[workflows/orchestrator.py]
     end
 
