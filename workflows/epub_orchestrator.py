@@ -19,7 +19,19 @@ class EpubOrchestrator:
                  prompts_path: str, 
                  glossary_path: Optional[str], 
                  logger: logging.Logger,
-                 output_dir: str):
+                 output_dir: str,
+                 save_llm_logs: bool = False):
+        self.data_source = data_source
+        self.target_lang = target_lang
+        self.concurrency = concurrency
+        self.prompts_path = prompts_path
+        self.glossary_path = glossary_path
+        self.logger = logger
+        self.prompts = {}
+        self.glossary = None
+        self.output_manager = OutputManager(output_dir, self.logger)
+        self.save_llm_logs = save_llm_logs
+        self._collected_llm_logs = [] # Initialize list to collect LLM logs
         self.data_source = data_source
         self.target_lang = target_lang
         self.concurrency = concurrency
@@ -53,12 +65,17 @@ class EpubOrchestrator:
         self.logger.info("Starting EPUB translation workflow...")
         self._load_resources()
 
+        translation_successful = True # Initialize to True, set to False on failure conditions
+
         # 1. 解析 EPUB (通过数据源)
         self.logger.info(f"Loading and parsing EPUB file: {self.data_source.source}...")
         try:
             book = self.data_source.get_data()
         except Exception as e:
             self.logger.error(f"Error parsing EPUB: {e}", exc_info=True)
+            translation_successful = False
+            # Always save LLM logs on unexpected errors
+            self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
             return
         self.logger.info("Parsing complete.")
 
@@ -83,22 +100,22 @@ class EpubOrchestrator:
         self.logger.info("Calling advanced asynchronous translation function...")
         source_lang = book.metadata.language_source if book.metadata.language_source else "en"
         
-        # Use output_manager for raw LLM log directory
-        raw_llm_log_dir = self.output_manager.get_workflow_output_path("epub_llm_logs", "raw_logs")
-        raw_llm_log_dir.mkdir(parents=True, exist_ok=True) # Ensure the directory exists
-
-        translated_results = await execute_translation_async(
+        translated_results, llm_logs = await execute_translation_async(
             tasks_to_translate=tasks_for_translator,
             source_lang_code=source_lang,
             target_lang=self.target_lang,
-            raw_llm_log_dir=str(raw_llm_log_dir), # Pass the correct argument for logging
             logger=self.logger,
             concurrency=self.concurrency,
             glossary=self.glossary
         )
+        self._collected_llm_logs.extend(llm_logs)
 
         if not translated_results:
             self.logger.error("Translation process failed or returned no results. Workflow terminated.")
+            translation_successful = False
+            # Save LLM logs on failure if option is enabled
+            if self.save_llm_logs:
+                self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
             return
         self.logger.info(f"Successfully received {len(translated_results)} results from the translator.")
 
@@ -127,11 +144,33 @@ class EpubOrchestrator:
         self.logger.info(f"Writing updated Book object to new EPUB file: {output_path}...")
         try:
             book_to_epub(translated_book, str(output_path))
+            translation_successful = True
         except Exception as e:
             self.logger.error(f"Error generating new EPUB file: {e}", exc_info=True)
+            translation_successful = False
             return
             
         self.logger.info("\n" + "="*50)
         self.logger.info("Workflow execution successful!")
         self.logger.info(f"New EPUB file saved to: {output_path}")
-        self.logger.info("="*50) 
+        self.logger.info("="*50)
+
+        # Save LLM logs based on success/failure and save_llm_logs flag
+        if not translation_successful or self.save_llm_logs:
+            self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
+
+    def _save_llm_logs_to_file(self, llm_logs: list[str], target_lang: str):
+        if not llm_logs:
+            self.logger.info("No LLM logs collected to save.")
+            return
+
+        log_file_name = f"llm_raw_responses_{target_lang.lower().replace('-', '').replace('_', '')}.jsonl"
+        log_file_path = self.output_manager.get_workflow_output_path("llm_logs", log_file_name)
+        
+        try:
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                for log_entry in llm_logs:
+                    f.write(log_entry + '\n')
+            self.logger.info(f"LLM raw response logs saved to: {log_file_path}")
+        except Exception as e:
+            self.logger.error(f"Failed to save LLM raw response logs to {log_file_path}: {e}", exc_info=True) 

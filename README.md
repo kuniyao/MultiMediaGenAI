@@ -59,6 +59,7 @@ python translate.py "YOUR_INPUT_SOURCE" --target_lang "zh-CN" --output_dir "Glob
 -   **`--prompts`**: (可选) 仅适用于 EPUB 翻译工作流。自定义 Prompts 的 JSON 文件路径。
 -   **`--glossary`**: (可选) 仅适用于 EPUB 翻译工作流。自定义术语表的 JSON 文件路径。
 -   **`--log_level`**: (可选) 日志级别，默认为 `INFO`。
+-   **`--save_llm_logs`**: (可选) 一个布尔标志。如果设置，LLM 原始响应的 JSON 日志文件将在翻译任务**失败时**保存到任务的输出目录中，便于调试和问题排查。
 
 所有生成的文件，包括翻译结果和任务日志，将被保存在 `--output_dir` 指定的目录下，并按视频标题或文件名创建子目录。
 

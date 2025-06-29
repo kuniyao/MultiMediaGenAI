@@ -84,11 +84,14 @@ class Translator:
             self.logger.critical(f"An unexpected error occurred while loading prompts: {e}", exc_info=True)
             raise
 
-    async def _call_gemini_api_async(self, messages: list, log_file_path: str | None, task_id: str, semaphore: asyncio.Semaphore) -> str | None:
+    async def _call_gemini_api_async(self, messages: list, task_id: str, semaphore: asyncio.Semaphore) -> tuple[str | None, str | None]:
         async with semaphore:
+            raw_text = None
+            log_entry_json_string = None
+
             if not self.model:
                 self.logger.error(f"Model is not initialized. Cannot call API for task {task_id}.")
-                return None
+                return None, None
             
             MAX_RETRIES = 5
             INITIAL_BACKOFF_SECONDS = 2
@@ -99,7 +102,7 @@ class Translator:
                     response = await self.model.generate_content_async(messages, request_options={'timeout': 300})
                     raw_text = response.text
                     self.logger.debug(f"Received response for task {task_id} on attempt {attempt + 1}.")
-                    return raw_text
+                    break # Success, exit retry loop
                 except (genai.APIError, asyncio.TimeoutError) as e:
                     self.logger.warning(f"API error for task {task_id} on attempt {attempt + 1}: {e}")
                     if attempt < MAX_RETRIES - 1:
@@ -108,25 +111,24 @@ class Translator:
                         await asyncio.sleep(backoff_time)
                     else:
                         self.logger.error(f"All {MAX_RETRIES} attempts failed for task {task_id}: {e}", exc_info=True)
-                        return None
+                        raw_text = None # Ensure raw_text is None on final failure
+                        break
                 except Exception as e:
                     self.logger.error(f"An unexpected error occurred for task {task_id}: {e}", exc_info=True)
-                    return None
+                    raw_text = None # Ensure raw_text is None on unexpected error
+                    break
             
-            if log_file_path and raw_text:
-                with open(log_file_path, 'a', encoding='utf-8') as f:
-                    log_entry = {"task_id": task_id, "response_text": raw_text}
-                    f.write(json.dumps(log_entry, ensure_ascii=False) + '\n')
+            # Prepare log entry regardless of success/failure
+            log_entry = {"task_id": task_id, "response_text": raw_text}
+            log_entry_json_string = json.dumps(log_entry, ensure_ascii=False)
             
-            return raw_text
+            return raw_text, log_entry_json_string
 
-    async def translate_chapters_async(self, chapter_tasks: list, source_lang_code: str, target_lang: str, output_path: str | None, concurrency_limit: int, glossary: Optional[Dict[str, str]] = None):
+    async def translate_chapters_async(self, chapter_tasks: list, source_lang_code: str, target_lang: str, concurrency_limit: int, glossary: Optional[Dict[str, str]] = None) -> tuple[list, list]:
         if not self.model:
             self.logger.error("Gemini model not initialized. Skipping translation.")
-            return []
+            return [], []
 
-        raw_llm_log_file = os.path.join(output_path, f"llm_raw_responses_{target_lang.lower().replace('-', '_')}.jsonl") if output_path else None
-        
         semaphore = asyncio.Semaphore(concurrency_limit)
         
         async_tasks = []
@@ -179,19 +181,23 @@ class Translator:
             )
             
             async_tasks.append(
-                self._call_gemini_api_async(prompt_messages, raw_llm_log_file, task_id, semaphore)
+                self._call_gemini_api_async(prompt_messages, task_id, semaphore)
             )
 
         self.logger.info(f"Executing {len(async_tasks)} translation tasks concurrently with a limit of {concurrency_limit}...")
-        api_responses = await asyncio.gather(*async_tasks)
+        api_responses_tuples = await asyncio.gather(*async_tasks)
         self.logger.info("All concurrent tasks have been completed.")
         
         translated_results = []
-        for task, response_text in zip(chapter_tasks, api_responses):
+        raw_llm_log_strings = []
+
+        for task, response_tuple in zip(chapter_tasks, api_responses_tuples):
             task_id = task['llm_processing_id']
             source_data = task['source_data']
             task_type = source_data.get('type')
             
+            response_text, log_string = response_tuple
+
             translated_text = f"[TRANSLATION_FAILED] Original content preserved for task {task_id}."
             
             if response_text:
@@ -204,39 +210,40 @@ class Translator:
                 "source_data": source_data
             })
             
-        return translated_results
+            if log_string:
+                raw_llm_log_strings.append(log_string)
+            
+        return translated_results, raw_llm_log_strings
 
 async def execute_translation_async(
     tasks_to_translate: list, 
     source_lang_code: str, 
     target_lang: str, 
-    raw_llm_log_dir: str | None = None, 
     logger: logging.Logger | None = None,
     concurrency: int = 5,
     glossary: Optional[Dict[str, str]] = None
-) -> list | None:
+) -> tuple[list | None, list]:
     logger_to_use = logger if logger else logging.getLogger(__name__)
     translator = Translator(logger=logger_to_use)
 
     logger_to_use.info(f"Starting async translation for {len(tasks_to_translate)} tasks from '{source_lang_code}' to '{target_lang}'...")
     
     # 直接传递收到的任务列表
-    translated_results = await translator.translate_chapters_async(
+    translated_results, raw_llm_log_strings = await translator.translate_chapters_async(
         chapter_tasks=tasks_to_translate,
         source_lang_code=source_lang_code,
         target_lang=target_lang,
-        output_path=raw_llm_log_dir,
         concurrency_limit=concurrency,
         glossary=glossary
     )
 
     if not translated_results:
         logger_to_use.error("Translation failed or returned no results.")
-        return None
+        return None, raw_llm_log_strings
         
     if len(translated_results) != len(tasks_to_translate):
         logger_to_use.critical(f"CRITICAL: Task count mismatch! Input tasks: {len(tasks_to_translate)}, Output results: {len(translated_results)}")
         # 即使不匹配，也继续处理，让调用者决定如何处理
     
     logger_to_use.info("Task count integrity check passed.")
-    return translated_results # <--- 返回通用的结果列表
+    return translated_results, raw_llm_log_strings # <--- 返回通用的结果列表

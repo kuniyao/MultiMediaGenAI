@@ -30,10 +30,11 @@ class TranslationOrchestrator:
     """
     Orchestrates the entire translation workflow, from data fetching to file saving.
     """
-    def __init__(self, data_source: DataSource, target_lang: str, output_dir: str, log_level: str = "INFO"):
+    def __init__(self, data_source: DataSource, target_lang: str, output_dir: str, log_level: str = "INFO", save_llm_logs: bool = False):
         self.data_source = data_source
         self.target_lang = target_lang
         self.log_level = log_level
+        self.save_llm_logs = save_llm_logs
         
         # Setup task-specific logger and output manager
         metadata = self.data_source.get_metadata()
@@ -52,12 +53,14 @@ class TranslationOrchestrator:
         self.task_logger.info(f"Task-specific output directory: {self.task_output_dir}")
 
         self.output_manager = OutputManager(str(self.task_output_dir), self.task_logger)
+        self._collected_llm_logs = [] # Initialize list to collect LLM logs
 
     async def run(self):
         """Executes the full translation workflow."""
         logger = self.task_logger
 
         try:
+            translation_successful = True # Initialize to True, set to False on failure conditions
             logger.info("--- Translation Workflow Started ---")
             
             # 1. Get segments from the data source
@@ -81,13 +84,14 @@ class TranslationOrchestrator:
 
             # 4. Initial Translation
             tasks_to_translate = subtitle_track_to_html_tasks(subtitle_track, logger, base_id=track_id)
-            initial_results = await execute_translation_async(
+            initial_results, initial_llm_logs = await execute_translation_async(
                 tasks_to_translate=tasks_to_translate,
                 source_lang_code=source_lang,
                 target_lang=self.target_lang,
-                raw_llm_log_dir=str(self.task_output_dir),
                 logger=logger
             )
+            self._collected_llm_logs.extend(initial_llm_logs)
+
             if not initial_results:
                 logger.error("Initial translation failed or returned no results. Aborting.")
                 return
@@ -123,13 +127,13 @@ class TranslationOrchestrator:
                     logger.warning("No retry tasks could be generated for untranslated segments. Aborting retry.")
                     break
 
-                retry_results = await execute_translation_async(
+                retry_results, retry_llm_logs = await execute_translation_async(
                     tasks_to_translate=retry_tasks,
                     source_lang_code=source_lang,
                     target_lang=self.target_lang,
-                    raw_llm_log_dir=str(self.task_output_dir),
                     logger=logger
                 )
+                self._collected_llm_logs.extend(retry_llm_logs)
 
                 if retry_results:
                     for result in retry_results:
@@ -151,8 +155,10 @@ class TranslationOrchestrator:
                 ])
                 if final_untranslated_count > 0:
                     logger.error(f"Finished all {MAX_RETRY_ROUNDS} retry rounds. {final_untranslated_count} segments remain untranslated.")
+                    translation_successful = False
                 else:
                     logger.info("All segments translated after all retry rounds.")
+                    translation_successful = True
 
             # 7. Save final SRT file (original step 6)
             srt_content = generate_post_processed_srt(subtitle_track, logger)
@@ -163,5 +169,27 @@ class TranslationOrchestrator:
             logger.info(f"--- Translation Workflow Finished Successfully ---")
             logger.info(f"Translated file saved to: {srt_path}")
 
+            # Save LLM logs based on success/failure and save_llm_logs flag
+            if not translation_successful or self.save_llm_logs:
+                self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
+
         except Exception as e:
             self.task_logger.critical(f"An unexpected error terminated the workflow: {e}", exc_info=True)
+            # Always save LLM logs on unexpected errors
+            self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
+
+    def _save_llm_logs_to_file(self, llm_logs: list[str], target_lang: str):
+        if not llm_logs:
+            self.task_logger.info("No LLM logs collected to save.")
+            return
+
+        log_file_name = f"llm_raw_responses_{target_lang.lower().replace('-', '').replace('_', '')}.jsonl"
+        log_file_path = self.output_manager.get_workflow_output_path("llm_logs", log_file_name)
+        
+        try:
+            with open(log_file_path, 'w', encoding='utf-8') as f:
+                for log_entry in llm_logs:
+                    f.write(log_entry + '\n')
+            self.task_logger.info(f"LLM raw response logs saved to: {log_file_path}")
+        except Exception as e:
+            self.task_logger.error(f"Failed to save LLM raw response logs to {log_file_path}: {e}", exc_info=True)

@@ -45,6 +45,7 @@ async def main():
     
     # General arguments
     parser.add_argument("--log_level", help="Set the logging level.", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+    parser.add_argument("--save_llm_logs", action="store_true", help="Save raw LLM response logs to the output directory.")
     args = parser.parse_args()
 
     # Setup global logger for the application
@@ -69,7 +70,8 @@ async def main():
             prompts_path=args.prompts,
             glossary_path=args.glossary,
             logger=root_logger,
-            output_dir=args.output_dir
+            output_dir=args.output_dir,
+            save_llm_logs=args.save_llm_logs
         )
     elif is_youtube_url(args.input) or file_extension in ['.srt', '.vtt', '.ass']: # Support more subtitle formats
         root_logger.info("Detected YouTube URL or subtitle file input. Starting subtitle translation workflow.")
@@ -89,7 +91,8 @@ async def main():
             data_source=data_source,
             target_lang=args.target_lang,
             output_dir=args.output_dir,
-            log_level=args.log_level
+            log_level=args.log_level,
+            save_llm_logs=args.save_llm_logs
         )
     else:
         root_logger.error(f"Error: Input '{args.input}' is not a supported file type or a valid YouTube URL.")
