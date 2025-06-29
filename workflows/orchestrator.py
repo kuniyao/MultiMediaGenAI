@@ -1,13 +1,26 @@
 import os
+import sys
 import logging
 from datetime import datetime
 import json
 from pathlib import Path
+import asyncio
 
 import config
 from data_sources.base_source import DataSource
-from common_utils.file_helpers import sanitize_filename, save_to_file
+import os
+import sys
+import logging
+from datetime import datetime
+import json
+from pathlib import Path
+import asyncio
+
+import config
+from data_sources.base_source import DataSource
+from common_utils.file_helpers import sanitize_filename
 from common_utils.log_config import setup_task_logger
+from common_utils.output_manager import OutputManager
 from format_converters import generate_post_processed_srt
 from format_converters.book_schema import SubtitleTrack, SubtitleSegment
 from llm_utils.translator import execute_translation_async
@@ -20,31 +33,28 @@ class TranslationOrchestrator:
     def __init__(self, data_source: DataSource, target_lang: str, output_dir: str, log_level: str = "INFO"):
         self.data_source = data_source
         self.target_lang = target_lang
-        self.base_output_dir = Path(output_dir)
         self.log_level = log_level
-        self.task_logger = None
-        self.video_output_path = None
-
-    def _setup_environment(self):
-        """Sets up the output directories and logging for the task."""
+        
+        # Setup task-specific logger and output manager
         metadata = self.data_source.get_metadata()
         sanitized_title = sanitize_filename(metadata.get("title", "untitled"))
-        
-        self.video_output_path = self.base_output_dir / sanitized_title
-        self.video_output_path.mkdir(parents=True, exist_ok=True)
-
         timestamp_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-        log_file_name = f"{sanitized_title}_{timestamp_str}.log"
-        log_file_full_path = self.video_output_path / log_file_name
-
-        numeric_log_level = getattr(logging, self.log_level.upper(), logging.INFO)
         logger_name = f"TaskWorkflow.{sanitized_title}.{timestamp_str}"
+        log_file_name = f"{sanitized_title}_{timestamp_str}.log"
+        
+        # The base_output_dir for OutputManager will be the task-specific directory
+        self.task_output_dir = Path(output_dir) / sanitized_title
+        self.task_output_dir.mkdir(parents=True, exist_ok=True) # Ensure the task-specific directory exists
+        
+        log_file_full_path = self.task_output_dir / log_file_name
+        numeric_log_level = getattr(logging, self.log_level.upper(), logging.INFO)
         self.task_logger = setup_task_logger(logger_name, log_file_full_path, level=numeric_log_level)
-        self.task_logger.info(f"Task-specific output directory: {self.video_output_path}")
+        self.task_logger.info(f"Task-specific output directory: {self.task_output_dir}")
+
+        self.output_manager = OutputManager(str(self.task_output_dir), self.task_logger)
 
     async def run(self):
         """Executes the full translation workflow."""
-        self._setup_environment()
         logger = self.task_logger
 
         try:
@@ -75,7 +85,7 @@ class TranslationOrchestrator:
                 tasks_to_translate=tasks_to_translate,
                 source_lang_code=source_lang,
                 target_lang=self.target_lang,
-                raw_llm_log_dir=str(self.video_output_path),
+                raw_llm_log_dir=str(self.task_output_dir),
                 logger=logger
             )
             if not initial_results:
@@ -117,7 +127,7 @@ class TranslationOrchestrator:
                     tasks_to_translate=retry_tasks,
                     source_lang_code=source_lang,
                     target_lang=self.target_lang,
-                    raw_llm_log_dir=str(self.video_output_path),
+                    raw_llm_log_dir=str(self.task_output_dir),
                     logger=logger
                 )
 
@@ -147,8 +157,8 @@ class TranslationOrchestrator:
             # 7. Save final SRT file (original step 6)
             srt_content = generate_post_processed_srt(subtitle_track, logger)
             file_basename = sanitize_filename(metadata.get("title", "translation"))
-            srt_path = self.video_output_path / f"{file_basename}_{self.target_lang}.srt"
-            save_to_file(srt_content, srt_path, logger)
+            srt_path = self.output_manager.get_workflow_output_path("subtitle", f"{file_basename}_{self.target_lang}.srt")
+            self.output_manager.save_file(srt_path, srt_content)
 
             logger.info(f"--- Translation Workflow Finished Successfully ---")
             logger.info(f"Translated file saved to: {srt_path}")
