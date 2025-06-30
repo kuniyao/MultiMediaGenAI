@@ -59,6 +59,18 @@ graph TD;
 
 ---
 
+## 数据流转与核心数据结构
+
+EPUB 翻译工作流的核心数据结构是 `format_converters.book_schema.Book` 对象。所有数据在不同阶段都围绕此对象进行转换和更新。
+
+-   **输入阶段**: 原始EPUB文件通过 `data_sources.epub_source.EpubSource` (内部调用 `format_converters.epub_parser.EpubParser`) 解析，并构建成一个 `Book` 对象。`Book` 对象包含了书的元数据、章节结构和原始HTML内容。
+-   **翻译任务提取**: `llm_utils.book_processor.extract_translatable_chapters` 从 `Book` 对象中提取出所有需要翻译的文本片段，并将其格式化为LLM可处理的“翻译任务”列表。每个任务包含原始文本和其在 `Book` 对象中的位置信息。
+-   **LLM交互与并发/重试**: `llm_utils.translator.execute_translation_async` 接收这些任务，并负责与LLM进行交互。它使用 `asyncio.Semaphore` 控制并发数，以异步方式批量发送翻译请求。`llm_utils.translator.py` 内部实现了LLM API调用的重试机制，当遇到API错误或超时时，会进行指数退避重试，确保翻译的稳定性。
+-   **结果应用**: LLM返回的翻译结果（通常是HTML片段）会被 `llm_utils.book_processor.apply_translations_to_book` 接收。该函数根据翻译任务中的位置信息，将LLM返回的译文精确地应用回原始 `Book` 对象中对应的章节内容。这个过程是“就地更新”，确保了翻译内容与原书结构的完美融合。
+-   **输出阶段**: 最终，更新后的 `Book` 对象通过 `format_converters.epub_writer.book_to_epub` 重新打包成一个新的EPUB文件，包括更新的元数据、目录和翻译后的章节内容。
+
+---
+
 ## 模块化步骤详解
 
 ### 1. 解析阶段 (Parsing)

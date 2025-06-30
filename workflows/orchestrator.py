@@ -5,16 +5,7 @@ from datetime import datetime
 import json
 from pathlib import Path
 import asyncio
-
-import config
-from data_sources.base_source import DataSource
-import os
-import sys
-import logging
-from datetime import datetime
-import json
-from pathlib import Path
-import asyncio
+import re
 
 import config
 from data_sources.base_source import DataSource
@@ -104,61 +95,15 @@ class TranslationOrchestrator:
                     logger=logger
                 )
 
-            # 6. Retry mechanism for untranslated segments
-            MAX_RETRY_ROUNDS = 3
-            RETRY_DELAY_SECONDS = 5
-            
-            for retry_round in range(MAX_RETRY_ROUNDS):
-                untranslated_segments = [
-                    seg for seg in subtitle_track.segments
-                    if not seg.translated_text or seg.translated_text.startswith("[TRANSLATION_FAILED]")
-                ]
-
-                if not untranslated_segments:
-                    logger.info(f"All segments translated after {retry_round + 1} rounds.")
-                    break
-                
-                logger.warning(f"Found {len(untranslated_segments)} untranslated segments after round {retry_round + 1}. Retrying...")
-
-                # Create new tasks only for untranslated segments
-                retry_tasks = subtitle_track_to_html_tasks(untranslated_segments, logger, base_id=track_id) 
-                
-                if not retry_tasks:
-                    logger.warning("No retry tasks could be generated for untranslated segments. Aborting retry.")
-                    break
-
-                retry_results, retry_llm_logs = await execute_translation_async(
-                    tasks_to_translate=retry_tasks,
-                    source_lang_code=source_lang,
-                    target_lang=self.target_lang,
-                    logger=logger
-                )
-                self._collected_llm_logs.extend(retry_llm_logs)
-
-                if retry_results:
-                    for result in retry_results:
-                        update_track_from_html_response(
-                            subtitle_track=subtitle_track,
-                            translated_html=result.get("translated_text", ""),
-                            logger=logger
-                        )
-                else:
-                    logger.warning(f"Retry round {retry_round + 1} yielded no new translations.")
-
-                if retry_round < MAX_RETRY_ROUNDS - 1:
-                    logger.info(f"Waiting {RETRY_DELAY_SECONDS} seconds before next retry round...")
-                    await asyncio.sleep(RETRY_DELAY_SECONDS)
-            else:
-                final_untranslated_count = len([
-                    seg for seg in subtitle_track.segments
-                    if not seg.translated_text or seg.translated_text.startswith("[TRANSLATION_FAILED]")
-                ])
-                if final_untranslated_count > 0:
-                    logger.error(f"Finished all {MAX_RETRY_ROUNDS} retry rounds. {final_untranslated_count} segments remain untranslated.")
-                    translation_successful = False
-                else:
-                    logger.info("All segments translated after all retry rounds.")
-                    translation_successful = True
+            # 6. Handle retries for untranslated segments
+            retry_success, retry_llm_logs = await self._handle_translation_retries(
+                subtitle_track=subtitle_track,
+                source_lang=source_lang,
+                logger=logger,
+                track_id=track_id
+            )
+            self._collected_llm_logs.extend(retry_llm_logs)
+            translation_successful = retry_success # Update overall success based on retry outcome
 
             # 7. Save final SRT file (original step 6)
             srt_content = generate_post_processed_srt(subtitle_track, logger)
@@ -178,12 +123,117 @@ class TranslationOrchestrator:
             # Always save LLM logs on unexpected errors
             self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
 
+    async def _handle_translation_retries(self, subtitle_track: SubtitleTrack, source_lang: str, logger: logging.Logger, track_id: str) -> tuple[bool, list]:
+        MAX_RETRY_ROUNDS = 3
+        RETRY_DELAY_SECONDS = 5
+        translation_successful_in_retry = True
+        collected_llm_logs_in_retry = []
+
+        for retry_round in range(MAX_RETRY_ROUNDS):
+            soft_error_segments = []
+            hard_error_segments = []
+
+            for seg in subtitle_track.segments:
+                if not seg.translated_text or seg.translated_text.startswith("[TRANSLATION_FAILED]"):
+                    if self._is_repeated_text(seg.translated_text):
+                        hard_error_segments.append(seg)
+                    else:
+                        soft_error_segments.append(seg)
+            
+            if not soft_error_segments and not hard_error_segments:
+                logger.info(f"All segments translated after {retry_round + 1} rounds.")
+                break
+            
+            # Process soft error segments first (batch translation)
+            if soft_error_segments:
+                logger.warning(f"Found {len(soft_error_segments)} soft error segments after round {retry_round + 1}. Retrying...")
+                soft_retry_tasks = subtitle_track_to_html_tasks(soft_error_segments, logger, base_id=track_id)
+                if soft_retry_tasks:
+                    soft_retry_results, soft_retry_llm_logs = await execute_translation_async(
+                        tasks_to_translate=soft_retry_tasks,
+                        source_lang_code=source_lang,
+                        target_lang=self.target_lang,
+                        logger=logger
+                    )
+                    collected_llm_logs_in_retry.extend(soft_retry_llm_logs)
+                    if soft_retry_results:
+                        for result in soft_retry_results:
+                            update_track_from_html_response(
+                                subtitle_track=subtitle_track,
+                                translated_html=result.get("translated_text", ""),
+                                logger=logger
+                            )
+                    else:
+                        logger.warning(f"Soft retry round {retry_round + 1} yielded no new translations.")
+                else:
+                    logger.warning("No soft retry tasks could be generated. Aborting soft retry.")
+
+            # Process hard error segments (individual translation)
+            if hard_error_segments:
+                logger.warning(f"Found {len(hard_error_segments)} hard error segments after round {retry_round + 1}. Retrying individually...")
+                for seg in hard_error_segments:
+                    hard_retry_tasks = subtitle_track_to_html_tasks([seg], logger, base_id=track_id) # Send individually
+                    if hard_retry_tasks:
+                        hard_retry_results, hard_retry_llm_logs = await execute_translation_async(
+                            tasks_to_translate=hard_retry_tasks,
+                            source_lang_code=source_lang,
+                            target_lang=self.target_lang,
+                            logger=logger
+                        )
+                        collected_llm_logs_in_retry.extend(hard_retry_llm_logs)
+                        if hard_retry_results:
+                            for result in hard_retry_results:
+                                update_track_from_html_response(
+                                    subtitle_track=subtitle_track,
+                                    translated_html=result.get("translated_text", ""),
+                                    logger=logger
+                                )
+                        else:
+                            logger.warning(f"Hard retry for segment {seg.id} yielded no new translation.")
+                    else:
+                        logger.warning(f"No hard retry task could be generated for segment {seg.id}. Aborting hard retry.")
+            
+            # Re-check untranslated segments after processing both types of errors
+            remaining_untranslated = [
+                seg for seg in subtitle_track.segments
+                if not seg.translated_text or seg.translated_text.startswith("[TRANSLATION_FAILED]")
+            ]
+
+            if not remaining_untranslated:
+                logger.info(f"All segments translated after {retry_round + 1} rounds.")
+                translation_successful_in_retry = True
+                break # All translated, exit retry loop
+            
+            if retry_round < MAX_RETRY_ROUNDS - 1:
+                logger.info(f"Waiting {RETRY_DELAY_SECONDS} seconds before next retry round...")
+                await asyncio.sleep(RETRY_DELAY_SECONDS)
+            else:
+                # If loop finishes and there are still untranslated segments
+                logger.error(f"Finished all {MAX_RETRY_ROUNDS} retry rounds. {len(remaining_untranslated)} segments remain untranslated.")
+                translation_successful_in_retry = False
+        
+        return translation_successful_in_retry, collected_llm_logs_in_retry
+
+    def _is_repeated_text(self, text: str) -> bool:
+        # Detects if a character is repeated 5 or more times consecutively.
+        # This is a basic check for common LLM errors like "我我我我我我我我我我..."
+        if not text:
+            return False
+        
+        # Regex to find any character (including Chinese characters) repeated 5 or more times
+        # The `.` matches any character except newline. `一-龥` matches Chinese characters.
+        # We use re.DOTALL to make '.' match newlines as well, in case the repeated text spans lines.
+        if re.search(r"(.)\1{4,}", text, re.DOTALL):
+            self.task_logger.warning(f"Detected repeated text pattern in: '{text[:50]}...'")
+            return True
+        return False
+
     def _save_llm_logs_to_file(self, llm_logs: list[str], target_lang: str):
         if not llm_logs:
             self.task_logger.info("No LLM logs collected to save.")
             return
 
-        log_file_name = f"llm_raw_responses_{target_lang.lower().replace('-', '').replace('_', '')}.jsonl"
+        log_file_name = f"llm_raw_responses_{target_lang.lower().replace('-','').replace('_','')}.jsonl"
         log_file_path = self.output_manager.get_workflow_output_path("llm_logs", log_file_name)
         
         try:

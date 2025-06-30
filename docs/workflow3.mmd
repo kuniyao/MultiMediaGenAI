@@ -3,14 +3,18 @@ graph TD;
         A[YouTube 链接或ID]
     end
 
+    subgraph Orchestration [统一协调]
+        O1[translate.py]
+        O2[workflows/orchestrator.py]
+    end
+
     subgraph Processing [处理流程]
-        B["<b>1. 获取原始字幕 & 标题</b><br>(youtube_utils.data_fetcher)"]
-        B_plus["<b>2. 智能预处理与合并片段</b><br>(format_converters.preprocessing)"]
-        C["<b>3. 构建 SubtitleTrack 数据对象</b><br>(workflow script)"]
-        D["<b>4. 将轨道转换为批量HTML任务</b><br>(llm_utils.subtitle_processor)"]
-        E["<b>5. 并发翻译HTML任务</b><br>(llm_utils.translator)"]
-        F["<b>6. 将HTML结果更新回轨道</b><br>(llm_utils.subtitle_processor)"]
-        G["<b>7. 生成SRT和MD文件内容</b><br>(format_converters.*)"]
+        B["<b>1. 數據源獲取片段</b><br>(data_sources.youtube_source.YouTubeSource)"]
+        C["<b>2. 构建 SubtitleTrack 数据对象</b><br>(workflows.orchestrator.py)"]
+        D["<b>3. 将轨道转换为批量HTML任务</b><br>(llm_utils.subtitle_processor)"]
+        E["<b>4. 并发翻译HTML任务</b><br>(llm_utils.translator)"]
+        F["<b>5. 将HTML结果更新回轨道</b><br>(llm_utils.subtitle_processor)"]
+        G["<b>6. 生成SRT和MD文件内容</b><br>(format_converters.postprocessing & format_converters.markdown_handler)"]
     end
 
     subgraph Output [输出]
@@ -18,5 +22,5 @@ graph TD;
         H2[翻译后的 .md 对照文件]
     end
 
-    A --> B --> B_plus --> C --> D --> E --> F --> G;
+    A --> O1 --> O2 --> B --> C --> D --> E --> F --> G;
     G --> H1 & H2;

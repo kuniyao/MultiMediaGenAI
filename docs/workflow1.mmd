@@ -3,6 +3,11 @@ graph TD;
         A[EPUB 文件]
     end
 
+    subgraph Orchestration [统一协调]
+        O1[translate.py]
+        O2[workflows/epub_orchestrator.py]
+    end
+
     subgraph Parsing [1. 解析阶段]
         direction LR
         B1["epub_to_book<br>(format_converters.epub_parser)"]
@@ -32,4 +37,6 @@ graph TD;
         G[翻译后的新 EPUB 文件]
     end
 
-    A --> B1 -- Book Object --> C1 -- 翻译任务列表 --> D1 -- 翻译结果 --> E1 -- 翻译后的 Book Object --> F1 --> G;
+    A --> O1 --> O2;
+    O2 --> B1;
+    B1 -- Book Object --> C1 -- 翻译任务列表 --> D1 -- 翻译结果 --> E1 -- 翻译后的 Book Object --> F1 --> G;

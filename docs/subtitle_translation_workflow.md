@@ -43,6 +43,18 @@ graph TD;
 
 ---
 
+## 数据流转与核心数据结构
+
+整个翻译工作流的核心是 `format_converters.book_schema.SubtitleTrack` 对象。所有数据在不同阶段都围绕此对象进行转换和更新。
+
+-   **输入阶段**: 原始字幕数据（无论是来自本地SRT文件还是YouTube API）首先被解析成一个标准化的片段列表（`list[dict]`），其中每个字典代表一个字幕片段，包含 `text`, `start`, `end` 等信息。
+-   **数据建模**: 这些片段被用于实例化 `SubtitleTrack` 对象。`SubtitleTrack` 内部维护一个 `segments` 列表，每个元素是 `SubtitleSegment` 对象，包含了原文、时间戳、ID等信息。
+-   **LLM交互**: 为了与LLM进行高效且无损的交互，`SubtitleTrack` 中的 `SubtitleSegment` 对象会被序列化成带有 `data-id` 等元数据属性的HTML字符串。LLM接收并翻译这些HTML，返回翻译后的HTML字符串。
+-   **结果应用**: LLM返回的翻译HTML会被解析，并根据 `data-id` 精确地更新回 `SubtitleTrack` 对象中对应 `SubtitleSegment` 的 `translated_text` 字段。这是一个“就地更新”的过程，确保了数据的一致性。
+-   **输出阶段**: 最终，完整的 `SubtitleTrack` 对象被用于生成翻译后的 `.srt` 文件和 `.md` 对照文件。
+
+---
+
 ## 模块化步骤详解
 
 ### 1. 数据源獲取片段 (Data Source Segment Retrieval)
@@ -93,8 +105,10 @@ graph TD;
 -   **任務與職責**:
     1.  **並發控制**: `orchestrator` 調用 `execute_translation_async`，該函數首先實例化一個 `Translator` 對象。核心的 `translate_chapters_async` 方法使用 `asyncio.Semaphore` 來創建一個並發任務池，從而能以受控的並發數（例如同時5個）向LLM API發出請求，兼顧了速度與穩定性。
     2.  **Prompt 构建**: 對於每一個任務（HTML批次），它會從 `prompts.json` 加載為字幕翻譯定制的Prompt模板（`html_subtitle_system_prompt` 和 `html_subtitle_user_prompt`），並將HTML內容填入，構建最終的API請求。
-    3.  **異步API調用**: `_call_gemini_api_async` 函數負責實際與Google Gemini API的通信。它使用 `await self.model.generate_content_async(...)` 發起異步調用，並設置了超時以防卡死。
-    4.  **日誌記錄**: 每次成功的API調用後，LLM返回的原始、未經處理的HTML響應會被記錄到一個 `.jsonl` 日誌文件中，便於調試和問題追溯。
+    3.  **異步API調用與錯誤重試**: `_call_gemini_api_async` 函數負責實際與Google Gemini API的通信。它使用 `await self.model.generate_content_async(...)` 發起異步調用，並設置了超時以防卡死。
+        -   **重试机制**: 内部实现了最多 `MAX_RETRIES` (默认为5次) 的重试机制，当遇到 `genai.APIError` 或 `asyncio.TimeoutError` 时，会进行指数退避（`INITIAL_BACKOFF_SECONDS * (2 ** attempt)`）后重试，以应对临时的网络波动或API限流。
+    4.  **工作流层面的重试**: 除了LLM API调用内部的重试，`orchestrator.py` 在完成一轮翻译后，会检查是否存在未翻译或翻译失败（以 `[TRANSLATION_FAILED]` 开头）的片段。如果存在，它会针对这些片段再次生成翻译任务，并进行最多 `MAX_RETRY_ROUNDS` (默认为3轮) 的重试，确保尽可能多的片段被翻译。每轮重试之间会有 `RETRY_DELAY_SECONDS` 的延迟。
+    5.  **日誌記錄**: 每次成功的API調用後，LLM返回的原始、未經處理的HTML響應會被記錄到一個 `.jsonl` 日誌文件中，便於調試和問題追溯。
 -   **輸出**: 一個包含LLM原始響應（即翻譯後的HTML字符串）的結果列表。
 
 ### 5. 应用翻译结果 (Result Application)
