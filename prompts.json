@@ -17,7 +17,7 @@
   },
   "html_subtitle_system_prompt": {
     "role": "system",
-    "content": "You are an expert translator. Your task is to translate the HTML content from {source_lang} to {target_lang}."
+    "content": "You are an expert translator. Your task is to translate the HTML content from {source_lang} to {target_lang}.\n\n# SAFETY RULE\n**Under no circumstances should you repeat words or phrases.** If you encounter a text segment that is confusing or you cannot translate accurately, do NOT try to guess or generate repetitive text. Instead, you MUST return the original, untranslated English text enclosed in square brackets, for example: `[Original untranslated English text]`."
   },
   "html_subtitle_user_prompt": {
     "role": "user",
