@@ -3,8 +3,8 @@
 from __future__ import annotations
 from bs4 import BeautifulSoup, Tag
 from format_converters import html_mapper
-from format_converters.book_schema import Chapter, Book, AnyBlock, TextItem, HeadingBlock
-from typing import List, Dict, Any, Tuple
+from format_converters.book_schema import Chapter, Book, AnyBlock, TextItem, HeadingBlock, ParagraphBlock, ImageBlock, ListBlock
+from typing import List, Dict, Any, Tuple, Optional
 from llm_utils.translator import get_model_client
 import config
 import pathlib
@@ -113,11 +113,14 @@ def extract_translatable_chapters(book: Book, logger=None) -> list:
     current_batch_tokens = 0
     soup = BeautifulSoup('', 'html.parser')
 
-    for chapter in book.chapters:
+    for chapter_index, chapter in enumerate(book.chapters):
         if not chapter.content:
             if logger: logger.info(f"Skipping chapter '{chapter.id}' as it has no content.")
             continue
         
+        for block_index, block in enumerate(chapter.content):
+                    block.mmg_id = f"chp{chapter_index}-blk{block_index}"
+
         content_to_process, was_injected = _prepare_chapter_content(chapter, logger)
         chapter_html = _serialize_blocks_to_html(content_to_process, soup)
         token_count = len(chapter_html) // 3
@@ -316,6 +319,43 @@ def _reassemble_and_apply_split_results(chapter_id: str, parts: List[Dict], chap
     logger.info(f"Applying re-assembled content for split chapter '{chapter_id}'.")
     target_chapter.content = full_blocks
 
+def _apply_fix_batch_result(result: Dict, translated_book: Book, image_resources: Dict, logger):
+    """
+    处理一个 'fix_batch' 类型的修复结果，将其中的内容精确地应用回 translated_book 中。
+    """
+    task_id = result["llm_processing_id"]
+    logger.info(f"Applying fix_batch patch from task '{task_id}'...")
+
+    # 1. 解析修复后的HTML，得到修复后的 Block 对象列表
+    repaired_html = result["translated_text"]
+    repaired_blocks = html_mapper.html_to_blocks(repaired_html, image_resources, logger)
+
+    if not repaired_blocks:
+        logger.warning(f"Could not parse any blocks from the fix_batch result of task '{task_id}'. Skipping patch.")
+        return
+
+    # 2. 为了高效查找，创建一个 mmg_id -> 修复后Block 的映射
+    repaired_block_map = {block.mmg_id: block for block in repaired_blocks if block.mmg_id}
+
+    # 3. 遍历原始的 translated_book，用修复后的 Block 替换掉旧的 Block
+    # 这是一个比较耗费资源的操作，但能确保替换的准确性
+    for chapter in translated_book.chapters:
+        new_content_list = []
+        replaced_in_chapter = False
+        for i, original_block in enumerate(chapter.content):
+            # 检查当前块的 mmg_id 是否在我们的修复映射中
+            if original_block.mmg_id and original_block.mmg_id in repaired_block_map:
+                repaired_block = repaired_block_map[original_block.mmg_id]
+                new_content_list.append(repaired_block) # 用修复后的新块替换
+                logger.info(f"  -> Patched block {original_block.mmg_id} in chapter '{chapter.id}'.")
+                replaced_in_chapter = True
+            else:
+                new_content_list.append(original_block) # 保留原始块
+        
+        # 如果本章有内容被替换，则更新章节的内容列表
+        if replaced_in_chapter:
+            chapter.content = new_content_list
+
 def _extract_final_titles(translated_book: Book, logger):
     """遍歷所有章節，從內容中提取最終標題。"""
     logger.info("Extracting authoritative titles from translated content...")
@@ -364,6 +404,8 @@ def apply_translations_to_book(original_book: Book, translated_results: list[dic
             if original_chapter_id not in grouped_split_parts:
                 grouped_split_parts[original_chapter_id] = []
             grouped_split_parts[original_chapter_id].append(result)
+        elif task_type == 'fix_batch':
+            _apply_fix_batch_result(result, translated_book, translated_book.image_resources, logger)
         else:
             logger.warning(f"Unknown task type '{task_type}' in result for task ID {result['llm_processing_id']}.")
 
@@ -378,3 +420,141 @@ def apply_translations_to_book(original_book: Book, translated_results: list[dic
     
     logger.info("Final translated Book object created successfully.")
     return translated_book
+
+# ==============================================================================
+#  【新增】STEP 2: VALIDATION AND REPAIR FUNCTIONS
+# ==============================================================================
+
+def _get_block_by_mmg_id(book: Book, mmg_id: str) -> Optional[AnyBlock]:
+    """一个辅助函数，根据 mmg_id 在 Book 对象中快速查找一个块。"""
+    if not mmg_id:
+        return None
+    for chapter in book.chapters:
+        for block in chapter.content:
+            if block.mmg_id == mmg_id:
+                return block
+    return None
+
+def _get_source_text_from_block(block: AnyBlock) -> str:
+    """从一个块对象中提取其最主要的源文纯文本。"""
+    if isinstance(block, (HeadingBlock, ParagraphBlock, ImageBlock)):
+        return block.content_source
+    elif isinstance(block, ListBlock):
+        # 简单地将所有列表项的源文连接起来
+        return " ".join(
+            html_mapper.get_plain_text(
+                BeautifulSoup(
+                    _serialize_blocks_to_html(item.content, BeautifulSoup('', 'html.parser')),
+                    'html.parser'
+                )
+            )
+            for item in block.items_source
+        )
+    # 可以根据需要为其他块类型添加更多逻辑
+    return ""
+
+def validate_and_extract_fixes(
+    original_book: Book,
+    translated_results: list[dict],
+    image_resources: dict,
+    logger
+) -> list[dict]:
+    """
+    验证初翻结果，找出"漏翻"的块，并生成一个修复任务列表。
+
+    Args:
+        original_book: 带有 mmg_id 的原始 Book 对象。
+        translated_results: 第一轮翻译返回的结果列表。
+        image_resources: 图片资源字典，html_to_blocks 需要它。
+        logger: 日志记录器。
+
+    Returns:
+        一个"修复任务"列表，结构与 extract_translatable_chapters 的输出类似。
+    """
+    logger.info("Starting validation of initial translation to find missed translations...")
+    fix_tasks = []
+    
+    # 1. 首先，我们需要将翻译结果解析成易于处理的格式：mmg_id -> translated_html
+    translated_html_map: Dict[str, str] = {}
+    soup_parser = BeautifulSoup('', 'html.parser')
+
+    for result in translated_results:
+        task_type = result["source_data"].get("type")
+        if task_type == 'json_batch':
+            try:
+                # 复用 apply_translations_to_book 中的 JSON 解析逻辑
+                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result["translated_text"], re.DOTALL)
+                json_string = match.group(1).strip() if match else result["translated_text"]
+                translated_chapters = json.loads(json_string)
+                for chapter_data in translated_chapters:
+                    # 将整个章节的 HTML 作为一个整体，后续再解析
+                    chapter_html_content = chapter_data.get('html_content', '')
+                    # 从章节HTML中解析出所有 mmg_id -> block_html 的映射
+                    temp_soup = BeautifulSoup(chapter_html_content, 'html.parser')
+                    for tag in temp_soup.find_all(attrs={"data-mmg-id": True}):
+                        mmg_id = tag.get('data-mmg-id')
+                        translated_html_map[mmg_id] = str(tag)
+
+            except json.JSONDecodeError:
+                logger.warning(f"JSON decode error during validation for task {result['llm_processing_id']}. Skipping.")
+        
+        elif task_type == 'split_part':
+            # 对于拆分的部分，整个内容都是 HTML
+            temp_soup = BeautifulSoup(result['translated_text'], 'html.parser')
+            for tag in temp_soup.find_all(attrs={"data-mmg-id": True}):
+                mmg_id = tag.get('data-mmg-id')
+                translated_html_map[mmg_id] = str(tag)
+
+    # 2. 遍历原始书籍的每一个块，进行对比
+    logger.info(f"Checking {len(translated_html_map)} translated blocks against original book...")
+    blocks_to_fix: List[AnyBlock] = []
+
+    for chapter in original_book.chapters:
+        for original_block in chapter.content:
+            if not original_block.mmg_id:
+                continue
+
+            translated_html = translated_html_map.get(original_block.mmg_id)
+            if not translated_html:
+                # 可能是非文本块，或者在翻译结果中丢失了
+                continue
+
+            # 将翻译后的HTML解析回一个临时的 Block 对象以进行比较
+            temp_translated_blocks = html_mapper.html_to_blocks(translated_html, image_resources, logger)
+            if not temp_translated_blocks:
+                continue
+            
+            translated_block = temp_translated_blocks[0]
+
+            # 3. 定义"漏翻"的判断逻辑
+            # 简单逻辑：如果翻译后的纯文本与源文纯文本相同，则视为漏翻。
+            source_text = _get_source_text_from_block(original_block).strip()
+            translated_text = _get_source_text_from_block(translated_block).strip()
+            
+            # 忽略纯符号或非常短的文本
+            if len(source_text) < 5 and not re.search('[a-zA-Z]', source_text):
+                continue
+
+            if source_text and source_text == translated_text:
+                logger.warning(f"Missed translation detected for block {original_block.mmg_id}. Source: '{source_text}'")
+                blocks_to_fix.append(original_block)
+
+    # 4. 将需要修复的块打包成新的翻译任务
+    if blocks_to_fix:
+        logger.info(f"Found {len(blocks_to_fix)} blocks that need repair. Packaging them into a new translation task.")
+        
+        # 将所有需要修复的块序列化为一个大的HTML片段
+        repair_html_content = _serialize_blocks_to_html(blocks_to_fix, soup_parser)
+        
+        # 创建一个类似于 extract_translatable_chapters 输出的修复任务
+        # 注意：这里我们将所有需要修复的块打包成一个任务。如果数量太多，未来可以考虑也进行拆分。
+        fix_task = {
+            "llm_processing_id": "fix_batch::" + "::".join(b.mmg_id for b in blocks_to_fix[:3]), # 创建一个代表性的ID
+            "text_to_translate": repair_html_content,
+            "source_data": {"type": "fix_batch", "repaired_mmg_ids": [b.mmg_id for b in blocks_to_fix]}
+        }
+        fix_tasks.append(fix_task)
+    else:
+        logger.info("Validation complete. No missed translations found.")
+
+    return fix_tasks

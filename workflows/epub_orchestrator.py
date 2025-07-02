@@ -7,7 +7,7 @@ from pathlib import Path
 
 from data_sources.epub_source import EpubSource
 from format_converters.epub_writer import book_to_epub
-from llm_utils.book_processor import extract_translatable_chapters, apply_translations_to_book
+from llm_utils.book_processor import extract_translatable_chapters, apply_translations_to_book, validate_and_extract_fixes
 from llm_utils.translator import execute_translation_async
 from common_utils.output_manager import OutputManager
 
@@ -20,7 +20,8 @@ class EpubOrchestrator:
                  glossary_path: Optional[str], 
                  logger: logging.Logger,
                  output_dir: str,
-                 save_llm_logs: bool = False):
+                 save_llm_logs: bool = False,
+                 max_chapters: Optional[int] = None):
         self.data_source = data_source
         self.target_lang = target_lang
         self.concurrency = concurrency
@@ -31,16 +32,8 @@ class EpubOrchestrator:
         self.glossary = None
         self.output_manager = OutputManager(output_dir, self.logger)
         self.save_llm_logs = save_llm_logs
+        self.max_chapters = max_chapters
         self._collected_llm_logs = [] # Initialize list to collect LLM logs
-        self.data_source = data_source
-        self.target_lang = target_lang
-        self.concurrency = concurrency
-        self.prompts_path = prompts_path
-        self.glossary_path = glossary_path
-        self.logger = logger
-        self.prompts = {}
-        self.glossary = None
-        self.output_manager = OutputManager(output_dir, self.logger)
 
     def _load_resources(self):
         """加载 prompts 和术语表."""
@@ -85,6 +78,11 @@ class EpubOrchestrator:
         if not translatable_chapters:
             self.logger.info("No translatable chapters found in this EPUB. Workflow terminated.")
             return
+        
+        if self.max_chapters and self.max_chapters > 0:
+            self.logger.info(f"Limiting translation to the first {self.max_chapters} chapters as requested.")
+            translatable_chapters = translatable_chapters[:self.max_chapters]
+
         self.logger.info(f"Extracted {len(translatable_chapters)} translatable chapter tasks.")
 
         tasks_for_translator = [
@@ -100,7 +98,7 @@ class EpubOrchestrator:
         self.logger.info("Calling advanced asynchronous translation function...")
         source_lang = book.metadata.language_source if book.metadata.language_source else "en"
         
-        translated_results, llm_logs = await execute_translation_async(
+        initial_translated_results, initial_llm_logs = await execute_translation_async(
             tasks_to_translate=tasks_for_translator,
             source_lang_code=source_lang,
             target_lang=self.target_lang,
@@ -108,22 +106,53 @@ class EpubOrchestrator:
             concurrency=self.concurrency,
             glossary=self.glossary
         )
-        self._collected_llm_logs.extend(llm_logs)
+        self._collected_llm_logs.extend(initial_llm_logs)
 
-        if not translated_results:
-            self.logger.error("Translation process failed or returned no results. Workflow terminated.")
+        if not initial_translated_results:
+            self.logger.error("Initial translation failed or returned no results. Workflow terminated.")
             translation_successful = False
             # Save LLM logs on failure if option is enabled
             if self.save_llm_logs:
                 self._save_llm_logs_to_file(self._collected_llm_logs, self.target_lang)
             return
-        self.logger.info(f"Successfully received {len(translated_results)} results from the translator.")
+        self.logger.info(f"Successfully received {len(initial_translated_results)} results from the initial translation round.")
+
+        # --- 【新增步骤 3.5: 验证和修复】 ---
+        repair_tasks = validate_and_extract_fixes(
+            original_book=book,
+            translated_results=initial_translated_results,
+            image_resources=book.image_resources,
+            logger=self.logger
+        )
+
+        final_results = initial_translated_results
+
+        if repair_tasks:
+            self.logger.info(f"Proceeding with a repair round for {len(repair_tasks)} task(s).")
+            
+            repair_results, repair_llm_logs = await execute_translation_async(
+                tasks_to_translate=repair_tasks,
+                source_lang_code=source_lang,
+                target_lang=self.target_lang,
+                logger=self.logger,
+                concurrency=self.concurrency, # 可以为修复任务设置较低的并发数
+                glossary=self.glossary
+            )
+            self._collected_llm_logs.extend(repair_llm_logs)
+
+            if repair_results:
+                self.logger.info("Repair round completed. Merging results.")
+                final_results.extend(repair_results)
+            else:
+                self.logger.warning("Repair round did not return any results. Proceeding with initial translations only.")
+        # --- 【新增步骤结束】 ---
 
         # 4. 应用翻译结果
         self.logger.info("Applying translations to create a new Book object...")
         translated_book = apply_translations_to_book(
             original_book=book,
-            translated_results=translated_results,
+            # 【修改】使用合并后的最终结果
+            translated_results=final_results, 
             logger=self.logger
         )
         

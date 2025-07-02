@@ -156,6 +156,12 @@ class Translator:
                     'user': self.prompts.get('html_split_part_user_prompt'),
                     'var_name': "html_content"
                 },
+                # 【新增】告诉程序如何处理 'fix_batch'
+                'fix_batch': {
+                    'system': self.prompts.get('html_split_part_system_prompt'), # 复用 html_split_part 的 system prompt
+                    'user': self.prompts.get('html_split_part_user_prompt'),   # 复用 html_split_part 的 user prompt
+                    'var_name': "html_content"                                # 告诉程序任务内容在 'text_to_translate' 字段
+                },
                 'html_subtitle_batch': {
                     'system': self.prompts.get('html_subtitle_system_prompt'),
                     'user': self.prompts.get('html_subtitle_user_prompt'),
@@ -164,6 +170,7 @@ class Translator:
             }
 
             config_for_type = prompt_config.get(task_type)
+            
             if not config_for_type:
                 self.logger.warning(f"Unknown task type '{task_type}' for task ID {task_id}. Skipping.")
                 continue

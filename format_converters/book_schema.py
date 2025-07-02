@@ -90,6 +90,7 @@ class ListItem(BaseModel):
 
 class BaseBlock(BaseModel):
     id: str
+    mmg_id: Optional[str] = None # 用于追踪的、稳定的、跨流程的ID
     status: Literal["untranslated", "translated", "in_progress", "reviewed"] = "untranslated"
     css_classes: Optional[List[str]] = None  # 存储HTML标签的class属性
 

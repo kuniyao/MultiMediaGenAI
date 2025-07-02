@@ -42,6 +42,7 @@ async def main():
     parser.add_argument("--concurrency", type=int, default=10, help="Concurrency limit for API requests (used by e-book workflow).")
     parser.add_argument("--prompts", type=str, default="prompts.json", help="Path to a JSON file with prompt templates (used by e-book workflow).")
     parser.add_argument("--glossary", type=str, default=None, help="Optional path to a JSON glossary file (used by e-book workflow).")
+    parser.add_argument("--max_chapters", type=int, default=None, help="Maximum number of chapters to translate (for testing).")
     
     # General arguments
     parser.add_argument("--log_level", help="Set the logging level.", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
@@ -71,7 +72,8 @@ async def main():
             glossary_path=args.glossary,
             logger=root_logger,
             output_dir=args.output_dir,
-            save_llm_logs=args.save_llm_logs
+            save_llm_logs=args.save_llm_logs,
+            max_chapters=args.max_chapters
         )
     elif is_youtube_url(args.input) or file_extension in ['.srt', '.vtt', '.ass']: # Support more subtitle formats
         root_logger.info("Detected YouTube URL or subtitle file input. Starting subtitle translation workflow.")

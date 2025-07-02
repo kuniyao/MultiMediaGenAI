@@ -35,22 +35,24 @@ def map_block_to_html(block: AnyBlock, soup: BeautifulSoup) -> Optional[Tag]:
         return map_note_content_to_html(block, soup)
     return None
 
-def add_css_classes(tag: Tag, block: AnyBlock):
-    """将block中的css_classes添加到tag中。"""
+def add_custom_attributes(tag: Tag, block: AnyBlock):
+    """将block中的css_classes和mmg_id添加到tag中。"""
     if hasattr(block, 'css_classes') and block.css_classes:
         tag['class'] = " ".join(block.css_classes)
+    if hasattr(block, 'mmg_id') and block.mmg_id:
+        tag['data-mmg-id'] = block.mmg_id
 
 def map_heading_to_html(block: HeadingBlock, soup: BeautifulSoup) -> Tag:
     """将 HeadingBlock 转换为 <h1>, <h2> ... 标签。"""
     tag = soup.new_tag(f"h{block.level}")
     tag.string = block.content_target if block.content_target else block.content_source
-    add_css_classes(tag, block)
+    add_custom_attributes(tag, block)  # <--- 【修改】调用新函数
     return tag
 
 def map_paragraph_to_html(block: ParagraphBlock, soup: BeautifulSoup) -> Tag:
     """将 ParagraphBlock 转换为 <p> 标签，并处理其内部的富文本。"""
     p_tag = soup.new_tag("p")
-    add_css_classes(p_tag, block)
+    add_custom_attributes(p_tag, block)
     content_to_map = block.content_rich_target if block.content_rich_target else block.content_rich_source
     map_rich_content_to_html(p_tag, content_to_map, soup)
     return p_tag
@@ -65,25 +67,53 @@ def map_image_to_html(block: ImageBlock, soup: BeautifulSoup) -> Tag:
         img_tag['class'] = " ".join(block.img_css_classes)
     if block.container_tag:
         container_tag = soup.new_tag(block.container_tag)
-        add_css_classes(container_tag, block)
+        add_custom_attributes(container_tag, block)
         container_tag.append(img_tag)
         return container_tag
     else:
-        add_css_classes(img_tag, block)
+        add_custom_attributes(img_tag, block)
         return img_tag
+
+# format_converters/html_mapper.py (修改后版本)
 
 def map_list_to_html(block: ListBlock, soup: BeautifulSoup) -> Tag:
     """将 ListBlock 转换为 <ul> 或 <ol> 标签，并递归处理其项目。"""
     list_tag_name = "ol" if block.ordered else "ul"
     list_tag = soup.new_tag(list_tag_name)
     items_to_map = block.items_target if block.items_target else block.items_source
+    
+    # =======================================================================
+    # 【改动 1: 注入 data-mmg-id】
+    # 这是本次修改的核心目标。我们检查 block 对象上是否存在 mmg_id 字段，
+    # 如果存在，就将其作为 data-mmg-id 属性写入到 <ul> 或 <ol> 标签中。
+    # =======================================================================
+    if hasattr(block, 'mmg_id') and block.mmg_id:
+        list_tag['data-mmg-id'] = block.mmg_id
+
+    # =======================================================================
+    # 【改动 2: 更安全地处理 CSS Class】
+    # 这部分逻辑与原始版本的目标一致，但写法更安全、更清晰。
+    # =======================================================================
     is_pseudo_list = False
-    final_classes = block.css_classes
-    if final_classes and 'pseudo-list-marker' in final_classes:
+    
+    # 步骤 2.1: 先复制一份 class 列表，而不是直接操作原始列表。
+    # 这是一个好的编程习惯，可以防止我们无意中修改了原始 block 对象的状态。
+    final_classes = block.css_classes.copy() if block.css_classes else []
+    
+    # 步骤 2.2: 检查并移除特殊标记。
+    # 如果找到了 'pseudo-list-marker'，就从我们复制的列表中移除它。
+    if 'pseudo-list-marker' in final_classes:
         is_pseudo_list = True
-        final_classes = [c for c in final_classes if c != 'pseudo-list-marker']
+        final_classes.remove('pseudo-list-marker')
+    
+    # 步骤 2.3: 如果列表里还有其他 class，就将它们写入标签。
     if final_classes:
         list_tag['class'] = " ".join(final_classes)
+        
+    # =======================================================================
+    # 【无改动部分】
+    # 下面的循环逻辑与原始版本完全相同，负责创建 <li> 标签并填充内容。
+    # =======================================================================
     for item in items_to_map:
         li_tag = soup.new_tag("li")
         map_rich_content_to_html(li_tag, item.content, soup)
@@ -94,12 +124,13 @@ def map_list_to_html(block: ListBlock, soup: BeautifulSoup) -> Tag:
         if is_pseudo_list:
             li_tag['class'] = 'pseudo-list-item'
         list_tag.append(li_tag)
+        
     return list_tag
 
 def map_table_to_html(block: TableBlock, soup: BeautifulSoup) -> Tag:
     """将 TableBlock 转换为 <table> 标签。"""
     table_tag = soup.new_tag("table")
-    add_css_classes(table_tag, block)
+    add_custom_attributes(table_tag, block)
     content_to_map = block.content_target if (block.content_target and (block.content_target.headers or block.content_target.rows)) else block.content_source
     if content_to_map.headers:
         thead = soup.new_tag("thead")
@@ -125,7 +156,7 @@ def map_table_to_html(block: TableBlock, soup: BeautifulSoup) -> Tag:
 def map_code_block_to_html(block: CodeBlock, soup: BeautifulSoup) -> Tag:
     """将 CodeBlock 转换为 <pre><code>...</code></pre> 结构。"""
     pre_tag = soup.new_tag("pre")
-    add_css_classes(pre_tag, block)
+    add_custom_attributes(pre_tag, block)
     code_tag = soup.new_tag("code")
     if block.language:
         code_tag['class'] = f"language-{block.language}"
@@ -147,14 +178,14 @@ def map_marker_to_html(block: MarkerBlock, soup: BeautifulSoup) -> Optional[Tag]
         hr_tag = soup.new_tag("hr")
         if block.title:
             hr_tag['title'] = block.title
-        add_css_classes(hr_tag, block)
+        add_custom_attributes(hr_tag, block)
         return hr_tag
     return None
 
 def map_note_content_to_html(block: NoteContentBlock, soup: BeautifulSoup) -> Tag:
     """将脚注/尾注内容块转换为HTML。"""
     note_div = soup.new_tag("div")
-    add_css_classes(note_div, block)
+    add_custom_attributes(note_div, block)
     note_div['id'] = block.id
     content_to_map = block.content_target if block.content_target else block.content_source
     for inner_block in content_to_map:
@@ -206,6 +237,10 @@ def get_css_classes(tag: Tag) -> Optional[List[str]]:
     if isinstance(classes, str):
         return classes.split()
     return None
+
+def get_mmg_id(tag: Tag) -> Optional[str]:
+    """从标签中提取 data-mmg-id 属性。"""
+    return tag.get('data-mmg-id')
 
 def generate_id() -> str:
     """生成一个唯一的ID字符串。"""
@@ -320,6 +355,7 @@ def parse_heading_block(tag: Tag) -> HeadingBlock:
     """解析标题标签 (<h1>, <h2>, etc.)。"""
     return HeadingBlock(
         id=generate_id(),
+        mmg_id=get_mmg_id(tag),  # <--- 【新增】
         level=int(tag.name[1]),
         content_source=get_plain_text(tag),
         css_classes=get_css_classes(tag)
@@ -329,6 +365,7 @@ def parse_paragraph_block(tag: Tag) -> ParagraphBlock:
     """解析段落标签 (<p>)。"""
     return ParagraphBlock(
         id=generate_id(),
+        mmg_id=get_mmg_id(tag),  # <--- 【新增】
         content_rich_source=parse_rich_content(tag),
         content_source=get_plain_text(tag),
         css_classes=get_css_classes(tag)
@@ -371,6 +408,7 @@ def parse_image_block(tag: Tag, chapter_base_dir: pathlib.Path, content_dir: pat
     alt_text = tag.get('alt', '')
     return ImageBlock(
         id=generate_id(),
+        mmg_id=get_mmg_id(tag.parent if tag.parent and tag.parent.name != '[document]' else tag), # <--- 【新增】ID通常在容器上
         path=final_path_decision,
         content_source=str(alt_text) if alt_text else '',
         img_css_classes=get_css_classes(tag)
@@ -392,6 +430,7 @@ def parse_list_block(tag: Tag) -> ListBlock:
         ))
     return ListBlock(
         id=generate_id(),
+        mmg_id=get_mmg_id(tag),  # <--- 【新增】
         ordered=tag.name == 'ol',
         items_source=items,
         css_classes=get_css_classes(tag)
