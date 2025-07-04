@@ -63,7 +63,7 @@ class EpubOrchestrator:
         # 1. 解析 EPUB (通过数据源)
         self.logger.info(f"Loading and parsing EPUB file: {self.data_source.source}...")
         try:
-            book = self.data_source.get_data()
+            book = self.data_source.get_book()
         except Exception as e:
             self.logger.error(f"Error parsing EPUB: {e}", exc_info=True)
             translation_successful = False

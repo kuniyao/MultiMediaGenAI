@@ -1,10 +1,11 @@
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Tuple
+from format_converters.book_schema import Book
 
-class DataSource(ABC):
+class SegmentedDataSource(ABC):
     """
-    Abstract base class for all data sources.
-    It defines the contract that all concrete data source implementations must follow.
+    Abstract base class for segment-based data sources (e.g., subtitles).
+    It defines the contract for sources that provide time-stamped segments.
     """
 
     @abstractmethod
@@ -14,9 +15,9 @@ class DataSource(ABC):
 
         Returns:
             A tuple containing:
-            - A list of subtitle segments, where each segment is a dictionary.
-            - The detected language code of the source (e.g., 'en').
-            - The type of the source (e.g., 'youtube', 'local_file').
+            - A list of subtitle segments.
+            - The detected language code of the source.
+            - The type of the source.
         """
         pass
 
@@ -24,7 +25,19 @@ class DataSource(ABC):
     def get_metadata(self) -> Dict[str, Any]:
         """
         Returns a dictionary of metadata about the source,
-        such as title, author, etc. This is used for naming output files
-        and directories.
+        such as title, author, etc.
+        """
+        pass
+
+class BookDataSource(ABC):
+    """
+    Abstract base class for book-like data sources (e.g., EPUB, other documents).
+    It defines the contract for sources that can be parsed into a Book object.
+    """
+
+    @abstractmethod
+    def get_book(self) -> Book:
+        """
+        Parses the source and converts it into a structured Book object.
         """
         pass

@@ -1,10 +1,9 @@
 from typing import List, Dict, Any, Tuple
 
-from .base_source import DataSource
+from .base_source import SegmentedDataSource
 from youtube_utils.data_fetcher import get_video_id, get_youtube_video_title, fetch_and_prepare_transcript
-from format_converters import merge_segments_intelligently
 
-class YouTubeSource(DataSource):
+class YouTubeSource(SegmentedDataSource):
     """
     Data source implementation for handling YouTube videos.
     """

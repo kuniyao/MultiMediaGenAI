@@ -8,7 +8,7 @@ import asyncio
 import re
 
 import config
-from data_sources.base_source import DataSource
+from data_sources.base_source import SegmentedDataSource
 from common_utils.file_helpers import sanitize_filename
 from common_utils.log_config import setup_task_logger
 from common_utils.output_manager import OutputManager
@@ -22,7 +22,7 @@ class TranslationOrchestrator:
     """
     Orchestrates the entire translation workflow, from data fetching to file saving.
     """
-    def __init__(self, data_source: DataSource, target_lang: str, output_dir: str, log_level: str = "INFO", save_llm_logs: bool = False):
+    def __init__(self, data_source: SegmentedDataSource, target_lang: str, output_dir: str, log_level: str = "INFO", save_llm_logs: bool = False):
         self.data_source = data_source
         self.target_lang = target_lang
         self.log_level = log_level

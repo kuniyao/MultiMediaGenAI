@@ -2,10 +2,10 @@ import os
 from pathlib import Path
 from typing import List, Dict, Any, Tuple
 
-from .base_source import DataSource
+from .base_source import SegmentedDataSource
 from format_converters import load_and_merge_srt_segments
 
-class LocalFileSource(DataSource):
+class LocalFileSource(SegmentedDataSource):
     """
     Data source implementation for handling local SRT files.
     """
