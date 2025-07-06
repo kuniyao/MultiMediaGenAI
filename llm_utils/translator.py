@@ -3,6 +3,7 @@
 import os
 import logging
 import google.generativeai as genai
+from google.api_core import exceptions as google_exceptions
 import json
 import config
 from pathlib import Path
@@ -103,7 +104,7 @@ class Translator:
                     raw_text = response.text
                     self.logger.debug(f"Received response for task {task_id} on attempt {attempt + 1}.")
                     break # Success, exit retry loop
-                except (genai.APIError, asyncio.TimeoutError) as e:
+                except (google_exceptions.GoogleAPICallError, asyncio.TimeoutError) as e:
                     self.logger.warning(f"API error for task {task_id} on attempt {attempt + 1}: {e}")
                     if attempt < MAX_RETRIES - 1:
                         backoff_time = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
