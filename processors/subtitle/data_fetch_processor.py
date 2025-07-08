@@ -1,7 +1,7 @@
 # 处理器1：获取数据
 # processors/data_fetch_processor.py
 
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from data_sources.local_file_source import LocalFileSource
 from data_sources.youtube_source import YouTubeSource

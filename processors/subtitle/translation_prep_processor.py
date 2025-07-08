@@ -1,5 +1,5 @@
 # 处理器3：准备翻译任务
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from llm_utils.subtitle_processor import subtitle_track_to_html_tasks
 import logging

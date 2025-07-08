@@ -1,5 +1,5 @@
 # 处理器5：生成最终内容
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from format_converters.postprocessing import generate_post_processed_srt
 import logging

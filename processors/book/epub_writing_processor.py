@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 # 导入你现有的、功能强大的核心函数
 from format_converters.epub_writer import book_to_epub

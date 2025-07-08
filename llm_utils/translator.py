@@ -1,223 +1,151 @@
-# llm_utils/translator.py (修改後)
+# llm_utils/translator.py (重构后)
 
-import os
 import logging
-import google.generativeai as genai
-from google.api_core import exceptions as google_exceptions
 import json
 import config
 from pathlib import Path
 from dotenv import load_dotenv
 import asyncio
-from typing import Dict, Optional, Any
+from typing import Dict, Optional, Any, List, Tuple
 
-class ModelInitializationError(Exception):
-    """Custom exception for errors during LLM model initialization."""
-    pass
+# --- 新的导入 ---
+from .base_client import BaseLLMClient
+from .gemini_client import GeminiClient
+# 在这里可以轻松地加入其他客户端
+# from .openai_client import OpenAIClient 
 
-# 導入我們新的通用prompt構建器
 from .prompt_builder import build_prompt_from_template
 
-# 加載 .env 文件
+# --- 全局设置 ---
 project_root = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=project_root / '.env')
 
-def get_model_client(logger=None, generation_config_overrides: dict | None = None):
-    logger = logger if logger else logging.getLogger(__name__)
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        logger.error("GEMINI_API_KEY not found in environment variables.")
-        raise ModelInitializationError("GEMINI_API_KEY not found in environment variables.")
+class ModelInitializationError(Exception):
+    """用于模型初始化期间错误的自定义异常。"""
+    pass
+
+# --- 客户端工厂 ---
+def get_llm_client(client_name: str, logger: Optional[logging.Logger] = None) -> BaseLLMClient:
+    """
+    根据名称获取并返回一个 LLM 客户端实例。
+    这是一个简单的工厂模式实现。
+    """
+    logger = logger or logging.getLogger(__name__)
     
-    try:
-        # 類型檢查工具可能不認識 configure，但運行時是正確的
-        genai.configure(api_key=api_key) # type: ignore
+    if client_name.lower() == "gemini":
+        logger.info("正在创建 GeminiClient...")
+        return GeminiClient(logger=logger)
+    # elif client_name.lower() == "openai":
+    #     logger.info("Creating OpenAIClient...")
+    #     return OpenAIClient(logger=logger)
+    else:
+        logger.error(f"不支持的 LLM 客户端: {client_name}")
+        raise ValueError(f"不支持的 LLM 客户端: {client_name}")
 
-        config_params = {"temperature": 0.0}
-        if generation_config_overrides:
-            config_params.update(generation_config_overrides)
-        
-        # 類型檢查工具可能不認識 types，但運行時是正確的
-        generation_config = genai.types.GenerationConfig(**config_params) # type: ignore
-        
-        # 類型檢查工具可能不認識 GenerativeModel，但運行時是正確的
-        model = genai.GenerativeModel( # type: ignore
-            config.LLM_MODEL_GEMINI,
-            generation_config=generation_config
-        )
-        logger.debug(f"Successfully initialized Gemini model client with config: {config_params}")
-        return model
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini model client: {e}", exc_info=True)
-        raise ModelInitializationError(f"Failed to initialize Gemini model client: {e}")
-
+# --- 核心翻译器类 ---
 class Translator:
-    def __init__(self, logger: Optional[logging.Logger] = None):
+    def __init__(self, logger: Optional[logging.Logger] = None, client_name: str = "gemini"):
         self.logger = logger if logger else logging.getLogger(__name__)
-        self.model = self._initialize_model()
         self.prompts = self._load_prompts()
+        # 通过工厂获取客户端
+        self.client: BaseLLMClient = get_llm_client(client_name, self.logger)
+        self._is_initialized = False
 
-    def _initialize_model(self):
+    async def initialize(self):
+        """异步初始化翻译器及其底层的 LLM 客户端。"""
+        if self._is_initialized:
+            return
         try:
-            model_client = get_model_client(self.logger)
-            if model_client is None:
-                raise ModelInitializationError("get_model_client returned None without raising an error.")
-            return model_client
-        except ModelInitializationError as e:
-            self.logger.critical(f"Failed to initialize LLM model: {e}")
-            raise  # Re-raise the exception to prevent Translator from being instantiated with a bad model
+            self.logger.info(f"正在初始化 {self.client.__class__.__name__}...")
+            await self.client.initialize()
+            self._is_initialized = True
+            self.logger.info(f"{self.client.__class__.__name__} 初始化成功。")
+        except Exception as e:
+            self.logger.critical(f"初始化 LLM 客户端失败: {e}", exc_info=True)
+            raise ModelInitializationError(f"初始化 LLM 客户端失败: {e}")
 
     def _load_prompts(self) -> Dict:
-        """Loads prompts from prompts.json."""
+        """从 prompts.json 加载提示。"""
         try:
             prompts_path = project_root / 'prompts.json'
             with open(prompts_path, 'r', encoding='utf-8') as f:
                 prompts = json.load(f)
-            self.logger.debug(f"Successfully loaded prompts from {prompts_path}")
+            self.logger.debug(f"成功从 {prompts_path} 加载提示。")
             return prompts
-        except FileNotFoundError:
-            self.logger.critical(f"prompts.json not found at {prompts_path}. Please ensure the file exists.")
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            self.logger.critical(f"加载或解析 prompts.json 失败: {e}")
             raise
-        except json.JSONDecodeError as e:
-            self.logger.critical(f"Error decoding prompts.json: {e}")
-            raise
-        except Exception as e:
-            self.logger.critical(f"An unexpected error occurred while loading prompts: {e}", exc_info=True)
-            raise
-
-    async def _call_gemini_api_async(self, messages: list, task_id: str, semaphore: asyncio.Semaphore) -> tuple[str | None, str | None]:
-        async with semaphore:
-            raw_text = None
-            log_entry_json_string = None
-
-            if not self.model:
-                self.logger.error(f"Model is not initialized. Cannot call API for task {task_id}.")
-                return None, None
-            
-            MAX_RETRIES = 5
-            INITIAL_BACKOFF_SECONDS = 2
-            
-            for attempt in range(MAX_RETRIES):
-                try:
-                    self.logger.debug(f"Requesting translation for task {task_id} (Attempt {attempt + 1}/{MAX_RETRIES})...")
-                    response = await self.model.generate_content_async(messages, request_options={'timeout': 300})
-                    raw_text = response.text
-                    self.logger.debug(f"Received response for task {task_id} on attempt {attempt + 1}.")
-                    break # Success, exit retry loop
-                except (google_exceptions.GoogleAPICallError, asyncio.TimeoutError) as e:
-                    self.logger.warning(f"API error for task {task_id} on attempt {attempt + 1}: {e}")
-                    if attempt < MAX_RETRIES - 1:
-                        backoff_time = INITIAL_BACKOFF_SECONDS * (2 ** attempt)
-                        self.logger.info(f"Retrying task {task_id} in {backoff_time} seconds...")
-                        await asyncio.sleep(backoff_time)
-                    else:
-                        self.logger.error(f"All {MAX_RETRIES} attempts failed for task {task_id}: {e}", exc_info=True)
-                        raw_text = None # Ensure raw_text is None on final failure
-                        break
-                except Exception as e:
-                    self.logger.error(f"An unexpected error occurred for task {task_id}: {e}", exc_info=True)
-                    raw_text = None # Ensure raw_text is None on unexpected error
-                    break
-            
-            # Prepare log entry regardless of success/failure
-            log_entry = {"task_id": task_id, "response_text": raw_text}
-            log_entry_json_string = json.dumps(log_entry, ensure_ascii=False)
-            
-            return raw_text, log_entry_json_string
 
     async def translate_chapters_async(self, chapter_tasks: list, source_lang_code: str, target_lang: str, concurrency_limit: int, glossary: Optional[Dict[str, str]] = None) -> tuple[list, list]:
-        if not self.model:
-            self.logger.error("Gemini model not initialized. Skipping translation.")
-            return [], []
+        """
+        使用配置的 LLM 客户端并发翻译章节任务。
+        """
+        if not self._is_initialized:
+            await self.initialize()
 
         semaphore = asyncio.Semaphore(concurrency_limit)
         
-        async_tasks = []
-        for i, task in enumerate(chapter_tasks):
-            task_id = task['llm_processing_id']
-            source_data = task['source_data']
-            task_type = source_data.get('type')
-            
-            self.logger.info(f"Preparing task {i + 1}/{len(chapter_tasks)} (ID: {task_id}, Type: {task_type})...")
-            
-            prompt_messages = []
-            variables: Dict[str, Any] = {
-                "source_lang": source_lang_code,
-                "target_lang": target_lang
-            }
-
-            prompt_config = {
-                'json_batch': {
-                    'system': self.prompts.get('json_batch_system_prompt'),
-                    'user': self.prompts.get('json_batch_user_prompt'),
-                    'var_name': "json_task_string"
-                },
-                'split_part': {
-                    'system': self.prompts.get('html_split_part_system_prompt'),
-                    'user': self.prompts.get('html_split_part_user_prompt'),
-                    'var_name': "html_content"
-                },
-                # 【新增】告诉程序如何处理 'fix_batch'
-                'fix_batch': {
-                    'system': self.prompts.get('html_split_part_system_prompt'), # 复用 html_split_part 的 system prompt
-                    'user': self.prompts.get('html_split_part_user_prompt'),   # 复用 html_split_part 的 user prompt
-                    'var_name': "html_content"                                # 告诉程序任务内容在 'text_to_translate' 字段
-                },
-                'html_subtitle_batch': {
-                    'system': self.prompts.get('html_subtitle_system_prompt'),
-                    'user': self.prompts.get('html_subtitle_user_prompt'),
-                    'var_name': "html_content"
+        async def translate_task(task):
+            async with semaphore:
+                task_id = task['llm_processing_id']
+                task_type = task['source_data'].get('type')
+                
+                self.logger.info(f"准备任务 (ID: {task_id}, 类型: {task_type})...")
+                
+                # --- 构建 Prompt 的逻辑保持不变 ---
+                prompt_config = {
+                    'json_batch': {'system': 'json_batch_system_prompt', 'user': 'json_batch_user_prompt', 'var_name': "json_task_string"},
+                    'split_part': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': "html_content"},
+                    'fix_batch': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': "html_content"},
+                    'html_subtitle_batch': {'system': 'html_subtitle_system_prompt', 'user': 'html_subtitle_user_prompt', 'var_name': "html_content"}
                 }
-            }
+                config_for_type = prompt_config.get(task_type)
+                if not config_for_type:
+                    self.logger.warning(f"任务 ID {task_id} 的任务类型 '{task_type}' 未知。正在跳过。")
+                    return None, None
 
-            config_for_type = prompt_config.get(task_type)
-            
-            if not config_for_type:
-                self.logger.warning(f"Unknown task type '{task_type}' for task ID {task_id}. Skipping.")
-                continue
+                variables: Dict[str, Any] = {"source_lang": source_lang_code, "target_lang": target_lang}
+                variables[config_for_type['var_name']] = task['text_to_translate']
 
-            system_prompt_template = config_for_type['system']
-            user_prompt_template = config_for_type['user']
-            variables[config_for_type['var_name']] = task['text_to_translate']
+                prompt_messages = build_prompt_from_template(
+                    self.prompts.get(config_for_type['system']),
+                    self.prompts.get(config_for_type['user']),
+                    variables,
+                    glossary,
+                    self.prompts.get('glossary_injection_template')
+                )
+                
+                # --- 调用通用客户端 ---
+                return await self.client.call_api_async(prompt_messages, task_id)
 
-            prompt_messages = build_prompt_from_template(
-                system_prompt_template,
-                user_prompt_template,
-                variables,
-                glossary,
-                self.prompts.get('glossary_injection_template')
-            )
-            
-            async_tasks.append(
-                self._call_gemini_api_async(prompt_messages, task_id, semaphore)
-            )
-
-        self.logger.info(f"Executing {len(async_tasks)} translation tasks concurrently with a limit of {concurrency_limit}...")
-        api_responses_tuples = await asyncio.gather(*async_tasks)
-        self.logger.info("All concurrent tasks have been completed.")
+        # 创建并执行所有异步任务
+        async_tasks = [translate_task(task) for task in chapter_tasks]
+        self.logger.info(f"正在以 {concurrency_limit} 的并发限制执行 {len(async_tasks)} 个翻译任务...")
+        api_responses_tuples = await asyncio.gather(*async_tasks, return_exceptions=True)
+        self.logger.info("所有并发任务已完成。")
         
+        # --- 处理结果的逻辑保持不变 ---
         translated_results = []
         raw_llm_log_strings = []
-
-        for task, response_tuple in zip(chapter_tasks, api_responses_tuples):
+        for task, response_or_exc in zip(chapter_tasks, api_responses_tuples):
             task_id = task['llm_processing_id']
-            source_data = task['source_data']
-            task_type = source_data.get('type')
-            
-            response_text, log_string = response_tuple
+            translated_text = f"[TRANSLATION_FAILED] 任务 {task_id} 的原始内容已保留。"
+            log_string = None
 
-            translated_text = f"[TRANSLATION_FAILED] Original content preserved for task {task_id}."
-            
-            if response_text:
-                # 對於 split_part 和 json_batch，我們現在都期望直接的文本/JSON string
-                translated_text = response_text
-            
+            if isinstance(response_or_exc, tuple):
+                response_text, log_string = response_or_exc
+                if response_text:
+                    translated_text = response_text
+            elif isinstance(response_or_exc, Exception):
+                self.logger.error(f"任务 {task_id} 在 API 调用中遇到异常: {response_or_exc}", exc_info=True)
+                log_entry = {"task_id": task_id, "response_text": f"Exception: {str(response_or_exc)}"}
+                log_string = json.dumps(log_entry, ensure_ascii=False)
+
             translated_results.append({
                 "llm_processing_id": task_id,
                 "translated_text": translated_text,
-                "source_data": source_data
+                "source_data": task['source_data']
             })
-            
             if log_string:
                 raw_llm_log_strings.append(log_string)
             
@@ -229,29 +157,38 @@ async def execute_translation_async(
     target_lang: str, 
     logger: logging.Logger | None = None,
     concurrency: int = 5,
-    glossary: Optional[Dict[str, str]] = None
+    glossary: Optional[Dict[str, str]] = None,
+    # 新增参数，用于选择客户端
+    client_name: str = "gemini"
 ) -> tuple[list | None, list]:
     logger_to_use = logger if logger else logging.getLogger(__name__)
-    translator = Translator(logger=logger_to_use)
-
-    logger_to_use.info(f"Starting async translation for {len(tasks_to_translate)} tasks from '{source_lang_code}' to '{target_lang}'...")
     
-    # 直接传递收到的任务列表
-    translated_results, raw_llm_log_strings = await translator.translate_chapters_async(
-        chapter_tasks=tasks_to_translate,
-        source_lang_code=source_lang_code,
-        target_lang=target_lang,
-        concurrency_limit=concurrency,
-        glossary=glossary
-    )
+    try:
+        # 实例化 Translator 时传入客户端名称
+        translator = Translator(logger=logger_to_use, client_name=client_name)
+        # 异步初始化
+        await translator.initialize()
 
-    if not translated_results:
-        logger_to_use.error("Translation failed or returned no results.")
-        return None, raw_llm_log_strings
+        logger_to_use.info(f"开始对 {len(tasks_to_translate)} 个任务进行从 '{source_lang_code}' 到 '{target_lang}' 的异步翻译...")
         
-    if len(translated_results) != len(tasks_to_translate):
-        logger_to_use.critical(f"CRITICAL: Task count mismatch! Input tasks: {len(tasks_to_translate)}, Output results: {len(translated_results)}")
-        # 即使不匹配，也继续处理，让调用者决定如何处理
-    
-    logger_to_use.info("Task count integrity check passed.")
-    return translated_results, raw_llm_log_strings # <--- 返回通用的结果列表
+        translated_results, raw_llm_log_strings = await translator.translate_chapters_async(
+            chapter_tasks=tasks_to_translate,
+            source_lang_code=source_lang_code,
+            target_lang=target_lang,
+            concurrency_limit=concurrency,
+            glossary=glossary
+        )
+
+        if not translated_results:
+            logger_to_use.error("翻译失败或未返回任何结果。")
+            return None, raw_llm_log_strings
+        
+        logger_to_use.info("翻译任务成功完成。")
+        return translated_results, raw_llm_log_strings
+
+    except ModelInitializationError as e:
+        logger_to_use.critical(f"无法执行翻译，因为模型初始化失败: {e}", exc_info=True)
+        return None, []
+    except Exception as e:
+        logger_to_use.critical(f"执行翻译期间发生意外错误: {e}", exc_info=True)
+        return None, []

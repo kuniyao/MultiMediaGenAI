@@ -1,5 +1,5 @@
 # 处理器2：数据建模
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from format_converters.book_schema import SubtitleTrack
 import logging

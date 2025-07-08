@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from llm_utils.translator import execute_translation_async
 

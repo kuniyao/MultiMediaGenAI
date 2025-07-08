@@ -1,4 +1,4 @@
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from format_converters.book_schema import SubtitleTrack
 from llm_utils.translator import execute_translation_async

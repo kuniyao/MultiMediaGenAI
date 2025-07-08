@@ -5,7 +5,6 @@ from bs4 import BeautifulSoup, Tag
 from format_converters import html_mapper
 from format_converters.book_schema import Chapter, Book, AnyBlock, TextItem, HeadingBlock, ParagraphBlock, ImageBlock, ListBlock
 from typing import List, Dict, Any, Tuple, Optional
-from llm_utils.translator import get_model_client
 import config
 import pathlib
 import re
@@ -460,101 +459,43 @@ def validate_and_extract_fixes(
     logger
 ) -> list[dict]:
     """
-    验证初翻结果，找出"漏翻"的块，并生成一个修复任务列表。
-
-    Args:
-        original_book: 带有 mmg_id 的原始 Book 对象。
-        translated_results: 第一轮翻译返回的结果列表。
-        image_resources: 图片资源字典，html_to_blocks 需要它。
-        logger: 日志记录器。
-
-    Returns:
-        一个"修复任务"列表，结构与 extract_translatable_chapters 的输出类似。
+    Validates the translated book against the original to find blocks that were missed
+    or failed during translation. Returns a list of new 'fix' tasks.
     """
-    logger.info("Starting validation of initial translation to find missed translations...")
-    fix_tasks = []
+    logger.info("Starting validation and fix extraction...")
     
-    # 1. 首先，我们需要将翻译结果解析成易于处理的格式：mmg_id -> translated_html
-    translated_html_map: Dict[str, str] = {}
-    soup_parser = BeautifulSoup('', 'html.parser')
-
-    for result in translated_results:
-        task_type = result["source_data"].get("type")
-        if task_type == 'json_batch':
-            try:
-                # 复用 apply_translations_to_book 中的 JSON 解析逻辑
-                match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', result["translated_text"], re.DOTALL)
-                json_string = match.group(1).strip() if match else result["translated_text"]
-                translated_chapters = json.loads(json_string)
-                for chapter_data in translated_chapters:
-                    # 将整个章节的 HTML 作为一个整体，后续再解析
-                    chapter_html_content = chapter_data.get('html_content', '')
-                    # 从章节HTML中解析出所有 mmg_id -> block_html 的映射
-                    temp_soup = BeautifulSoup(chapter_html_content, 'html.parser')
-                    for tag in temp_soup.find_all(attrs={"data-mmg-id": True}):
-                        mmg_id = tag.get('data-mmg-id')
-                        translated_html_map[mmg_id] = str(tag)
-
-            except json.JSONDecodeError:
-                logger.warning(f"JSON decode error during validation for task {result['llm_processing_id']}. Skipping.")
-        
-        elif task_type == 'split_part':
-            # 对于拆分的部分，整个内容都是 HTML
-            temp_soup = BeautifulSoup(result['translated_text'], 'html.parser')
-            for tag in temp_soup.find_all(attrs={"data-mmg-id": True}):
-                mmg_id = tag.get('data-mmg-id')
-                translated_html_map[mmg_id] = str(tag)
-
-    # 2. 遍历原始书籍的每一个块，进行对比
-    logger.info(f"Checking {len(translated_html_map)} translated blocks against original book...")
-    blocks_to_fix: List[AnyBlock] = []
-
+    # 构建一个从 mmg_id 到原始块文本的映射
+    source_map = {}
     for chapter in original_book.chapters:
-        for original_block in chapter.content:
-            if not original_block.mmg_id:
-                continue
+        for block in chapter.content:
+            if hasattr(block, 'mmg_id'):
+                source_map[block.mmg_id] = _get_source_text_from_block(block)
 
-            translated_html = translated_html_map.get(original_block.mmg_id)
-            if not translated_html:
-                # 可能是非文本块，或者在翻译结果中丢失了
-                continue
+    # 在翻译结果中找到所有被标记为失败的块
+    failed_block_ids = set()
+    for result in translated_results:
+        text = result.get("translated_text", "")
+        # 寻找被标记为失败的特定 ID
+        matches = re.findall(r"\[TRANSLATION_FAILED: (chp\d+-blk\d+)\]", text)
+        failed_block_ids.update(matches)
 
-            # 将翻译后的HTML解析回一个临时的 Block 对象以进行比较
-            temp_translated_blocks = html_mapper.html_to_blocks(translated_html, image_resources, logger)
-            if not temp_translated_blocks:
-                continue
-            
-            translated_block = temp_translated_blocks[0]
+    fix_payloads = []
+    for mmg_id in failed_block_ids:
+        if mmg_id in source_map:
+            source_html = source_map[mmg_id]
+            # 直接创建修复任务
+            fix_payloads.append({
+                "llm_processing_id": f"fix::{mmg_id}",
+                "text_to_translate": source_html,
+                "source_data": {
+                    "type": "fix_batch",
+                    "original_mmg_id": mmg_id,
+                }
+            })
 
-            # 3. 定义"漏翻"的判断逻辑
-            # 简单逻辑：如果翻译后的纯文本与源文纯文本相同，则视为漏翻。
-            source_text = _get_source_text_from_block(original_block).strip()
-            translated_text = _get_source_text_from_block(translated_block).strip()
-            
-            # 忽略纯符号或非常短的文本
-            if len(source_text) < 5 and not re.search('[a-zA-Z]', source_text):
-                continue
-
-            if source_text and source_text == translated_text:
-                logger.warning(f"Missed translation detected for block {original_block.mmg_id}. Source: '{source_text}'")
-                blocks_to_fix.append(original_block)
-
-    # 4. 将需要修复的块打包成新的翻译任务
-    if blocks_to_fix:
-        logger.info(f"Found {len(blocks_to_fix)} blocks that need repair. Packaging them into a new translation task.")
-        
-        # 将所有需要修复的块序列化为一个大的HTML片段
-        repair_html_content = _serialize_blocks_to_html(blocks_to_fix, soup_parser)
-        
-        # 创建一个类似于 extract_translatable_chapters 输出的修复任务
-        # 注意：这里我们将所有需要修复的块打包成一个任务。如果数量太多，未来可以考虑也进行拆分。
-        fix_task = {
-            "llm_processing_id": "fix_batch::" + "::".join(b.mmg_id for b in blocks_to_fix[:3]), # 创建一个代表性的ID
-            "text_to_translate": repair_html_content,
-            "source_data": {"type": "fix_batch", "repaired_mmg_ids": [b.mmg_id for b in blocks_to_fix]}
-        }
-        fix_tasks.append(fix_task)
+    if fix_payloads:
+        logger.warning(f"Found {len(fix_payloads)} blocks needing repair. Creating fix tasks.")
     else:
-        logger.info("Validation complete. No missed translations found.")
-
-    return fix_tasks
+        logger.info("Validation complete. No blocks require fixing.")
+        
+    return fix_payloads

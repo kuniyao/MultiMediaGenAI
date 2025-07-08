@@ -1,5 +1,5 @@
 # 处理器6：写入文件
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from common_utils.output_manager import OutputManager
 from common_utils.file_helpers import sanitize_filename

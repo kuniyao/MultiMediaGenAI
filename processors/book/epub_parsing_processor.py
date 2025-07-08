@@ -1,5 +1,5 @@
 import logging
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from data_sources.epub_source import EpubSource
 

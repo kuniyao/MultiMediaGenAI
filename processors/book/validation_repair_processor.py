@@ -1,5 +1,5 @@
 import logging
-from .base_processor import BaseProcessor
+from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 # 导入你现有的、功能强大的核心函数
 from llm_utils.book_processor import validate_and_extract_fixes

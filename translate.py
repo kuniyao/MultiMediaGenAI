@@ -14,20 +14,20 @@ from workflows.dto import PipelineContext
 # 导入所有处理器
 from processors.base_processor import BaseProcessor
 # 字幕工作流处理器
-from processors.data_fetch_processor import DataFetchProcessor
-from processors.modeling_processor import ModelingProcessor
-from processors.translation_prep_processor import TranslationPrepProcessor
-from processors.translation_core_processor import TranslationCoreProcessor
-from processors.output_gen_processor import OutputGenProcessor
+from processors.subtitle.data_fetch_processor import DataFetchProcessor
+from processors.subtitle.modeling_processor import ModelingProcessor
+from processors.subtitle.translation_prep_processor import TranslationPrepProcessor
+from processors.subtitle.translation_core_processor import TranslationCoreProcessor
+from processors.subtitle.output_gen_processor import OutputGenProcessor
 # 【新】导入EPUB工作流处理器
-from processors.epub_parsing_processor import EpubParsingProcessor
-from processors.chapter_extraction_processor import ChapterExtractionProcessor
-from processors.book_translation_processor import BookTranslationProcessor
-from processors.validation_repair_processor import ValidationAndRepairProcessor
-from processors.book_build_processor import BookBuildProcessor
-from processors.epub_writing_processor import EpubWritingProcessor
+from processors.book.epub_parsing_processor import EpubParsingProcessor
+from processors.book.chapter_extraction_processor import ChapterExtractionProcessor
+from processors.book.book_translation_processor import BookTranslationProcessor
+from processors.book.validation_repair_processor import ValidationAndRepairProcessor
+from processors.book.book_build_processor import BookBuildProcessor
+from processors.book.epub_writing_processor import EpubWritingProcessor
 # 【修改】将FileWriteProcessor重命名为更具体的SubtitleFileWriteProcessor
-from processors.file_write_processor import FileWriteProcessor as SubtitleFileWriteProcessor
+from processors.subtitle.file_write_processor import FileWriteProcessor as SubtitleFileWriteProcessor
 
 # --- 统一导入结束 ---
 
@@ -68,7 +68,7 @@ async def main():
     # --- 核心逻辑：组装与运行 ---
     file_extension = os.path.splitext(args.input)[1].lower()
     
-    # 准备初始化的上下文“货箱”
+    # 准备初始化的上下文"货箱"
     initial_context = PipelineContext(
         source_input=args.input,
         target_lang=args.target_lang,
