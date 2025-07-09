@@ -11,10 +11,12 @@ class SubtitlePostProcessor:
     """
     # Pre-compiled regex patterns for efficiency
     _DIALOGUE_SPLITTER_PATTERN = re.compile(r'\s*-\s*')
-    _PUNCTUATION_SPLITTER_PATTERN = re.compile(r'([。？！.])')
+    _STRONG_PUNCTUATION_SPLITTER_PATTERN = re.compile(r'([。？！.])')
+    _WEAK_PUNCTUATION_SPLITTER_PATTERN = re.compile(r'([，；：—,;:-])')
     _DECIMAL_PATTERN = re.compile(r'(\d)\.(\d)')
     
-    # List of punctuation to prefer breaking on for line wrapping
+    # Configuration for splitting logic
+    _SOFT_LENGTH_THRESHOLD = 80 # Characters
     _WRAP_BREAK_PUNCTUATION = ['。', '？', '！', '，', '.', '?', '!', ',']
 
     # Placeholders for protecting text during splitting
@@ -59,30 +61,34 @@ class SubtitlePostProcessor:
         duration = end_time - start_time
 
         if not text or duration <= 0:
-            return [{'start': start_time, 'end': end_time, 'text': text}]
+            return [{'start': start_time, 'end': end_time, 'text': self._restore_text(text)}]
 
-        # --- Stage 1: Dialogue Splitting (Macro - Averaging) ---
+        # --- Stage 1: Dialogue Splitting (Proportional Timing) ---
         dialogue_parts = [p.strip() for p in self._DIALOGUE_SPLITTER_PATTERN.split(text) if p.strip()]
 
         if len(dialogue_parts) > 1:
             processed_dialogue_parts = [dialogue_parts[0]] + ['- ' + p for p in dialogue_parts[1:]]
             
-            num_dialogue_parts = len(processed_dialogue_parts)
-            avg_duration_per_dialogue = duration / num_dialogue_parts
-            
+            total_dialogue_len = sum(len(p) for p in processed_dialogue_parts)
+            if total_dialogue_len == 0: # Avoid division by zero
+                return self._split_by_strong_punctuation({
+                    'start': start_time, 'end': end_time, 'text': text
+                })
+
             all_new_segments = []
             current_time = start_time
             
             for i, part_text in enumerate(processed_dialogue_parts):
+                part_duration = (len(part_text) / total_dialogue_len) * duration
                 part_start_time = current_time
-                part_end_time = current_time + avg_duration_per_dialogue
+                part_end_time = current_time + part_duration
                 
                 temp_segment_for_split = {
                     'start': part_start_time,
                     'end': part_end_time,
                     'text': part_text
                 }
-                inner_segments = self._split_by_punctuation(temp_segment_for_split)
+                inner_segments = self._split_by_strong_punctuation(temp_segment_for_split)
                 
                 all_new_segments.extend(inner_segments)
                 current_time = part_end_time
@@ -92,41 +98,40 @@ class SubtitlePostProcessor:
 
             return all_new_segments
         else:
-            temp_segment_for_split = {
+            # If no dialogue, process the whole text as a single segment
+            return self._split_by_strong_punctuation({
                 'start': start_time,
                 'end': end_time,
                 'text': text
-            }
-            return self._split_by_punctuation(temp_segment_for_split)
+            })
 
-    def _split_by_punctuation(self, segment: dict) -> List[dict]:
+    def _split_by_strong_punctuation(self, segment: dict) -> List[dict]:
         """
-        Splits a segment by punctuation and then by line limits,
-        proportionally distributing time at each split level.
+        Splits a segment by strong punctuation (e.g., '.?!').
+        This is the primary segmentation layer.
         """
-        # Note: Text coming into this function is already protected.
         text = segment.get('text', '').strip()
         start_time = segment['start']
         end_time = segment['end']
         duration = end_time - start_time
 
         if not text or duration <= 0:
-            return self._create_segment_from_chunk(text, start_time, end_time)
+            # Before creating a segment, pass it through the weak splitter
+            return self._split_by_weak_punctuation({'start': start_time, 'end': end_time, 'text': text})
 
-        # --- Level 1 Split: By Punctuation ---
         text_fragments = []
-        parts = self._PUNCTUATION_SPLITTER_PATTERN.split(text)
+        parts = self._STRONG_PUNCTUATION_SPLITTER_PATTERN.split(text)
         for i in range(0, len(parts), 2):
             fragment = "".join(parts[i:i+2]).strip()
             if fragment:
                 text_fragments.append(fragment)
 
         if not text_fragments:
-            return self._create_segment_from_chunk(text, start_time, end_time)
+            return self._split_by_weak_punctuation({'start': start_time, 'end': end_time, 'text': text})
 
         total_len = sum(len(p) for p in text_fragments)
         if total_len == 0:
-            return self._create_segment_from_chunk(text, start_time, end_time)
+            return self._split_by_weak_punctuation({'start': start_time, 'end': end_time, 'text': text})
 
         final_segments = []
         current_time = start_time
@@ -134,22 +139,10 @@ class SubtitlePostProcessor:
         for fragment_text in text_fragments:
             fragment_duration = (len(fragment_text) / total_len) * duration if total_len > 0 else 0
             fragment_end_time = current_time + fragment_duration
-
-            # --- Level 2 Split: By Line Limit ---
-            text_chunks = self._chunk_text_by_line_limit(fragment_text)
             
-            if len(text_chunks) <= 1:
-                # No overflow, create a single segment
-                final_segments.extend(self._create_segment_from_chunk(fragment_text, current_time, fragment_end_time))
-            else:
-                # Overflow occurred, re-distribute fragment's duration among chunks
-                total_chunk_len = sum(len(c) for c in text_chunks)
-                chunk_current_time = current_time
-                for chunk_text in text_chunks:
-                    chunk_duration = (len(chunk_text) / total_chunk_len) * fragment_duration if total_chunk_len > 0 else 0
-                    chunk_end_time = chunk_current_time + chunk_duration
-                    final_segments.extend(self._create_segment_from_chunk(chunk_text, chunk_current_time, chunk_end_time))
-                    chunk_current_time = chunk_end_time
+            # Instead of going to chunking, pass to the next level of splitting
+            temp_segment = {'start': current_time, 'end': fragment_end_time, 'text': fragment_text}
+            final_segments.extend(self._split_by_weak_punctuation(temp_segment))
             
             current_time = fragment_end_time
 
@@ -158,11 +151,75 @@ class SubtitlePostProcessor:
 
         return final_segments
 
+    def _split_by_weak_punctuation(self, segment: dict) -> List[dict]:
+        """
+        Splits a segment by weak punctuation (e.g., ',;:—') if it's too long.
+        This is the secondary segmentation layer.
+        """
+        text = segment.get('text', '').strip()
+        start_time = segment['start']
+        end_time = segment['end']
+        duration = end_time - start_time
+
+        # If segment is short enough, just send it to the final chunking/wrapping stage
+        if len(text) <= self._SOFT_LENGTH_THRESHOLD:
+            return self._create_segment_from_chunk(text, start_time, end_time)
+
+        text_fragments = []
+        parts = self._WEAK_PUNCTUATION_SPLITTER_PATTERN.split(text)
+        for i in range(0, len(parts), 2):
+            fragment = "".join(parts[i:i+2]).strip()
+            if fragment:
+                text_fragments.append(fragment)
+        
+        # If no weak punctuation found, or only one fragment, no point splitting
+        if len(text_fragments) <= 1:
+            return self._create_segment_from_chunk(text, start_time, end_time)
+            
+        total_len = sum(len(p) for p in text_fragments)
+        if total_len == 0:
+            return self._create_segment_from_chunk(text, start_time, end_time)
+
+        final_segments = []
+        current_time = start_time
+        for fragment_text in text_fragments:
+            fragment_duration = (len(fragment_text) / total_len) * duration if total_len > 0 else 0
+            fragment_end_time = current_time + fragment_duration
+            # After weak splitting, the result goes to the final chunking/wrapping
+            final_segments.extend(self._create_segment_from_chunk(fragment_text, current_time, fragment_end_time))
+            current_time = fragment_end_time
+        
+        if final_segments:
+            final_segments[-1]['end'] = end_time
+
+        return final_segments
+
     def _create_segment_from_chunk(self, text: str, start: float, end: float) -> List[dict]:
-        """Creates a final segment dictionary from a text chunk."""
-        restored_text = self._restore_text(text)
-        # This function now returns a list, though it's a list of one
-        return [{'start': start, 'end': end, 'text': restored_text.strip()}]
+        """
+        Creates final segment(s) from a text chunk, handling line limit overflows.
+        This is the final stage of processing.
+        """
+        restored_text_chunks = self._chunk_text_by_line_limit(self._restore_text(text))
+        
+        if len(restored_text_chunks) <= 1:
+            return [{'start': start, 'end': end, 'text': restored_text_chunks[0] if restored_text_chunks else ''}]
+        
+        # Overflow occurred, re-distribute duration among the final chunks
+        final_segments = []
+        total_chunk_len = sum(len(c) for c in restored_text_chunks)
+        current_time = start
+        duration = end - start
+
+        for chunk_text in restored_text_chunks:
+            chunk_duration = (len(chunk_text) / total_chunk_len) * duration if total_chunk_len > 0 else 0
+            chunk_end_time = current_time + chunk_duration
+            final_segments.append({'start': current_time, 'end': chunk_end_time, 'text': chunk_text.strip()})
+            current_time = chunk_end_time
+
+        if final_segments:
+            final_segments[-1]['end'] = end
+
+        return final_segments
 
     def _chunk_text_by_line_limit(self, text: str) -> List[str]:
         """
