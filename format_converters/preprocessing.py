@@ -1,6 +1,232 @@
 import re
 import logging
 import config
+from dataclasses import dataclass, field
+
+@dataclass
+class _SegmentBuffer:
+    """A buffer to hold segment data during the merging process."""
+    text: str = ""
+    start_char_offset: int = -1
+    
+    char_map_slice: list[float] = field(default_factory=list)
+
+    def __post_init__(self):
+        self.end_char_offset = self.start_char_offset + len(self.text) -1
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.text
+
+    @property
+    def start_time(self) -> float:
+        return self.char_map_slice[0] if self.char_map_slice else 0.0
+
+    @property
+    def end_time(self) -> float:
+        return self.char_map_slice[-1] if self.char_map_slice else 0.0
+
+    @property
+    def duration(self) -> float:
+        return self.end_time - self.start_time
+
+    def append(self, text_part: str, char_map_slice_part: list[float]):
+        if self.is_empty:
+            self.start_char_offset = 0 # Assuming it starts from 0 initially
+        
+        self.text += text_part
+        self.char_map_slice.extend(char_map_slice_part)
+        self.end_char_offset += len(text_part)
+
+    def split_at(self, split_index: int) -> tuple['_SegmentBuffer', '_SegmentBuffer']:
+        """Splits the buffer at a given index and returns two new buffers."""
+        text1 = self.text[:split_index].rstrip()
+        text2 = self.text[split_index:].lstrip()
+
+        # Adjust split index for char_map based on stripped text
+        map_split_index = len(text1)
+
+        buffer1 = _SegmentBuffer(
+            text=text1,
+            start_char_offset=self.start_char_offset,
+            char_map_slice=self.char_map_slice[:map_split_index]
+        )
+        
+        buffer2 = _SegmentBuffer(
+            text=text2,
+            start_char_offset=self.start_char_offset + map_split_index,
+            char_map_slice=self.char_map_slice[map_split_index:]
+        )
+        return buffer1, buffer2
+
+class IntelligentSegmentMerger:
+    """
+    Encapsulates the logic for merging raw transcript segments into
+    semantically coherent sentences.
+    """
+    MAX_MERGED_SEGMENT_CHARS = 250
+    MAX_MERGED_SEGMENT_DURATION = 15
+
+    # Regex patterns for normalization and splitting
+    _DECIMAL_PATTERN = re.compile(r'(\d)\.(\d)')
+    _ABBREVIATION_PATTERN = re.compile(r'(Mr|Mrs|Miss|Ms|Dr|St)\.')
+    _SPECIAL_PUNCTUATION_PATTERN = re.compile(r'\s*([.?!]{2,})')
+    _CHINESE_PUNCTUATION_PATTERN = re.compile(r'。。+')
+    # Updated to handle quotes after sentence-ending punctuation
+    _SENTENCE_SPLIT_PATTERN = re.compile(r'(?<!<SPECIALPUNC>)([.?!])["\']?(?!<SPECIALPUNC>)(?=\s+|$)')
+
+    # Prioritized list of delimiters for smart splitting
+    _SMART_SPLIT_DELIMITERS = [',', ';', ':', ' and ', ' but ', ' or ', ' so ']
+
+    # Normalization rules, making it easy to add more.
+    # The order matters: protect decimals first.
+    _NORMALIZATION_RULES = [
+        (_DECIMAL_PATTERN, r'\1<DECIMAL_DOT>\2'),
+        (_CHINESE_PUNCTUATION_PATTERN, '...'),
+        (_ABBREVIATION_PATTERN, r'\1<PERIOD>'),
+        (_SPECIAL_PUNCTUATION_PATTERN, r'<SPECIALPUNC>\1<SPECIALPUNC>')
+    ]
+
+    def __init__(self, transcript_segments, logger, max_chars=250, max_duration=15):
+        self.transcript_segments = transcript_segments
+        self.logger = logger
+        self.full_text = ""
+        self.char_map = []
+        self.max_chars = max_chars
+        self.max_duration = max_duration
+
+    def merge(self):
+        """
+        Executes the merging process.
+        """
+        self._prepare_text_and_char_map()
+        if not self.full_text:
+            return []
+
+        sentences = self._split_text_into_sentences()
+        final_segments = self._build_merged_segments(sentences)
+
+        return final_segments
+
+    def _prepare_text_and_char_map(self):
+        """
+        Combines all text from segments and creates a character-to-timestamp map.
+        """
+        last_time = 0.0
+        for segment in self.transcript_segments:
+            is_dict = isinstance(segment, dict)
+            text = (segment.get('text', '') if is_dict else getattr(segment, 'text', '')).strip()
+            start = segment.get('start', last_time) if is_dict else getattr(segment, 'start', last_time)
+
+            if not is_dict and hasattr(segment, 'duration'):
+                duration = segment.duration
+            elif is_dict and 'duration' in segment:
+                duration = segment['duration']
+            else: # Fallback for local files that might be missing duration
+                end = segment.get('end', start) if is_dict else getattr(segment, 'end', start)
+                duration = end - start
+
+            end_time = start + duration
+            last_time = end_time
+
+            if not text:
+                continue
+
+            self.full_text += text + " "
+
+            if len(text) > 0:
+                time_per_char = duration / len(text)
+                for i in range(len(text)):
+                    self.char_map.append(start + i * time_per_char)
+                self.char_map.append(end_time)
+
+        self.full_text = self.full_text.strip()
+
+    def _split_text_into_sentences(self):
+        """
+        Normalizes and splits the full text into sentences using regex.
+        """
+        normalized_text = self.full_text
+        for pattern, replacement in self._NORMALIZATION_RULES:
+            normalized_text = pattern.sub(replacement, normalized_text)
+
+        return self._SENTENCE_SPLIT_PATTERN.split(normalized_text)
+
+    def _find_best_split_point(self, text: str) -> int:
+        """Finds the best point to split a long text segment."""
+        split_point = self.max_chars
+        
+        # Try to split by prioritized delimiters first
+        for delimiter in self._SMART_SPLIT_DELIMITERS:
+            pos = text.rfind(delimiter, 0, split_point)
+            if pos != -1:
+                # Split after the delimiter
+                return pos + len(delimiter)
+        
+        # Fallback to the last space
+        last_space = text.rfind(' ', 0, split_point)
+        if last_space != -1:
+            return last_space + 1
+
+        # If no good split point is found, force split at max_chars
+        return split_point
+
+    def _build_merged_segments(self, sentences):
+        """
+        Reconstructs final segments from sentences using a buffer and smart splitting.
+        """
+        final_segments = []
+        current_buffer = _SegmentBuffer()
+        char_offset = 0
+
+        def _add_segment_from_buffer(buffer: _SegmentBuffer):
+            if buffer.is_empty:
+                return
+            
+            text = buffer.text.strip().replace('<PERIOD>', '.').replace('<DECIMAL_DOT>', '.')
+            text = text.replace('<SPECIALPUNC>', '')
+
+            if not text:
+                return
+
+            final_segments.append({
+                'text': text,
+                'start': buffer.start_time,
+                'end': buffer.end_time,
+                'duration': buffer.duration
+            })
+            self.logger.debug(f"Added segment: '{text[:50]}...' (Chars: {len(text)}, Time: {buffer.start_time:.2f}-{buffer.end_time:.2f})")
+
+        for part in sentences:
+            if not part:
+                continue
+            
+            part_len = len(part)
+            part_char_map_slice = self.char_map[char_offset : char_offset + part_len]
+            current_buffer.append(part, part_char_map_slice)
+            char_offset += part_len
+
+            # Smart splitting for long buffers
+            while len(current_buffer.text) > self.max_chars or current_buffer.duration > self.max_duration:
+                split_point = self._find_best_split_point(current_buffer.text)
+                
+                # Avoid infinite loops if a single part is too long
+                if split_point == 0 or split_point >= len(current_buffer.text):
+                     break
+
+                buffer_to_add, remaining_buffer = current_buffer.split_at(split_point)
+                _add_segment_from_buffer(buffer_to_add)
+                current_buffer = remaining_buffer
+
+            # Check if the part ends a sentence
+            if part.strip() and part.strip()[-1] in ".?!":
+                 _add_segment_from_buffer(current_buffer)
+                 current_buffer = _SegmentBuffer()
+
+        # Add any remaining text in the buffer
+        _add_segment_from_buffer(current_buffer)
+
+        return final_segments
 
 def merge_segments_intelligently(transcript_segments, logger=None):
     """
@@ -11,148 +237,8 @@ def merge_segments_intelligently(transcript_segments, logger=None):
     if not transcript_segments:
         return []
 
-    # 1. Combine all text and create a character-to-timestamp map
-    full_text = ""
-    char_map = []
-    last_time = 0.0
-
-    for segment in transcript_segments:
-        is_dict = isinstance(segment, dict)
-        text = (segment.get('text', '') if is_dict else getattr(segment, 'text', '')).strip()
-        start = segment.get('start', last_time) if is_dict else getattr(segment, 'start', last_time)
-        
-        # For YouTube transcripts, duration is a property, not in the dict
-        if not is_dict and hasattr(segment, 'duration'):
-            duration = segment.duration
-            end = start + duration
-        elif is_dict and 'duration' in segment:
-            duration = segment['duration']
-            end = start + duration
-        else: # Fallback for local files that might be missing duration
-            end = segment.get('end', start) if is_dict else getattr(segment, 'end', start)
-            duration = end - start
-
-        last_time = start + duration
-
-        if not text:
-            continue
-
-        full_text += text + " "
-        
-        if len(text) > 0:
-            time_per_char = duration / len(text)
-            for i in range(len(text)):
-                char_map.append(start + i * time_per_char)
-            char_map.append(end)
-
-    full_text = full_text.strip()
-    if not full_text:
-        return []
-
-    # 2. Normalize text for better splitting
-    normalized_text = re.sub(r'。。+', '...', full_text)
-    normalized_text = re.sub(r'(Mr|Mrs|Ms|Dr|St)\.', r'\1<PERIOD>', normalized_text)
-    normalized_text = re.sub(r'\s*([.?!]{2,})', r'<SPECIALPUNC>\1<SPECIALPUNC>', normalized_text)
-
-    # 3. Split the text into sentences using a robust regex
-    sentences = re.split(r'(?<!<SPECIALPUNC>)([.?!])(?!<SPECIALPUNC>)(?=\s+|$)', normalized_text)
-
-    # 4. Reconstruct segments from the split sentences
-    final_segments = []
-    current_char_offset_in_full_text = 0
-    current_sentence_buffer = ""
-
-    # Define a maximum character limit for a merged segment
-    MAX_MERGED_SEGMENT_CHARS = 250 # Adjust this value as needed
-    MAX_MERGED_SEGMENT_DURATION = 15 # Max duration in seconds for a merged segment
-
-    def _add_final_segment(text_to_add, start_char_idx, end_char_idx):
-        sentence_text = text_to_add.strip()
-        sentence_text = sentence_text.replace('<PERIOD>', '.')
-        sentence_text = sentence_text.replace('<SPECIALPUNC>', '')
-
-        if not sentence_text:
-            return
-
-        # Ensure indices are within bounds of char_map
-        start_time = char_map[min(start_char_idx, len(char_map) - 1)] if char_map else 0.0
-        end_time = char_map[min(end_char_idx, len(char_map) - 1)] if char_map else 0.0
-
-        final_segments.append({
-            'text': sentence_text,
-            'start': start_time,
-            'end': end_time,
-            'duration': end_time - start_time
-        })
-        logger_to_use.debug(f"Added segment: '{sentence_text[:50]}...' (Chars: {start_char_idx}-{end_char_idx}, Time: {start_time:.2f}-{end_time:.2f})")
-
-    for i, part in enumerate(sentences):
-        if not part.strip():
-            continue
-
-        current_sentence_buffer += part
-        stripped_part = part.strip()
-        
-        # Determine if a segment should be created
-        # Condition 1: End of a natural sentence (based on punctuation)
-        # Condition 2: End of the last part in the entire text
-        is_natural_sentence_end = (len(stripped_part) == 1 and stripped_part in '.?!')
-        is_last_part = (i == len(sentences) - 1)
-
-        # Force split if buffer is too long or too long in duration
-        buffer_len = len(current_sentence_buffer)
-        if buffer_len > 0:
-            start_idx = min(current_char_offset_in_full_text, len(char_map) - 1)
-            end_idx = min(current_char_offset_in_full_text + buffer_len - 1, len(char_map) - 1)
-            buffer_duration = char_map[end_idx] - char_map[start_idx]
-        else:
-            buffer_duration = 0
-
-        while buffer_len >= MAX_MERGED_SEGMENT_CHARS or buffer_duration > MAX_MERGED_SEGMENT_DURATION:
-            # Find a practical split point
-            # Default to the max character limit
-            split_point = MAX_MERGED_SEGMENT_CHARS
-
-            # Try to find a space before the character limit to avoid splitting words
-            last_space = current_sentence_buffer.rfind(' ', 0, split_point)
-            if last_space != -1:
-                split_point = last_space
-            
-            # If the segment is still too long (no space found), force split
-            segment_text = current_sentence_buffer[:split_point].strip()
-            
-            if not segment_text: # Avoid creating empty segments
-                break
-
-            # Calculate character indices for this forced segment
-            segment_start_char_idx = current_char_offset_in_full_text
-            segment_end_char_idx = segment_start_char_idx + len(segment_text) - 1
-            
-            _add_final_segment(segment_text, segment_start_char_idx, segment_end_char_idx)
-            
-            # Update buffer and offsets for the next loop iteration
-            current_sentence_buffer = current_sentence_buffer[split_point:].strip()
-            current_char_offset_in_full_text += len(segment_text) + (len(current_sentence_buffer) - len(current_sentence_buffer.lstrip())) # Account for removed text and leading spaces
-
-            # Recalculate length and duration for the while condition
-            buffer_len = len(current_sentence_buffer)
-            if buffer_len > 0:
-                start_idx = min(current_char_offset_in_full_text, len(char_map) - 1)
-                end_idx = min(current_char_offset_in_full_text + buffer_len - 1, len(char_map) - 1)
-                buffer_duration = char_map[end_idx] - char_map[start_idx]
-            else:
-                buffer_duration = 0
-
-        # If it's a natural sentence end or the last part, add the remaining buffer as a segment
-        if is_natural_sentence_end or is_last_part:
-            if current_sentence_buffer:
-                segment_start_char_idx = current_char_offset_in_full_text
-                segment_end_char_idx = segment_start_char_idx + len(current_sentence_buffer) - 1
-                _add_final_segment(current_sentence_buffer, segment_start_char_idx, segment_end_char_idx)
-                current_char_offset_in_full_text = segment_end_char_idx + 1
-                current_sentence_buffer = ""
-
-    return final_segments
+    merger = IntelligentSegmentMerger(transcript_segments, logger_to_use)
+    return merger.merge()
 
 def load_and_merge_srt_segments(file_path, logger):
     """
@@ -167,13 +253,13 @@ def load_and_merge_srt_segments(file_path, logger):
         A list of merged subtitle segments, or None if the file is empty.
     """
     from .srt_handler import srt_to_segments
-    
+
     logger.info(f"Reading and formatting SRT file: {file_path}")
     raw_subtitle_segments = srt_to_segments(file_path)
     if not raw_subtitle_segments:
         logger.error("No segments found in the SRT file. Aborting.")
         return None
-        
+
     logger.info(f"Loaded {len(raw_subtitle_segments)} raw segments from SRT file.")
 
     merged_segments = merge_segments_intelligently(raw_subtitle_segments, logger=logger)
