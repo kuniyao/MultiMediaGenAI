@@ -32,7 +32,7 @@ class GeminiClient(BaseLLMClient):
             raise ValueError("未在环境变量中找到 GEMINI_API_KEY。")
         
         try:
-            genai.configure(api_key=api_key)
+            genai.configure(api_key=api_key) # type: ignore
 
             config_params = {"temperature": 0.0}
             if self.generation_config_overrides:

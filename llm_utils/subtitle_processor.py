@@ -3,6 +3,7 @@ import json
 import logging
 from typing import List, Callable, Dict, Any, Union
 import config
+import re
 
 # ==============================================================================
 # 1. 通用分批逻辑 (Generic Batching Logic) - 修改为JSON适用
@@ -101,25 +102,31 @@ def update_track_from_json_response(track: SubtitleTrack, response_text: str, lo
         logger.warning("Received empty response text. Nothing to update.")
         return
 
+    # 【健壮性修复】在使用json.loads之前，先用正则表达式清理已知的LLM生成错误，如重复的键
+    # 例如，修复 "id": "id": "seg_1" -> "id": "seg_1"
+    cleaned_response_text = re.sub(r'"(id|text)"\s*:\s*"(id|text)"\s*:', r'"\1":', response_text)
+    if cleaned_response_text != response_text:
+        logger.debug("Applied regex cleaning for duplicated JSON keys.")
+        
     parsed_data = None
     try:
         # 优先尝试直接解析，这是最理想的情况
-        parsed_data = json.loads(response_text)
+        parsed_data = json.loads(cleaned_response_text)
         logger.debug("Successfully parsed JSON response directly.")
     except json.JSONDecodeError:
-        logger.warning(f"Initial JSON parsing failed. Attempting lenient parsing for response: '{response_text[:200]}...'")
+        logger.debug(f"Initial JSON parsing failed. Attempting lenient parsing for response: '{cleaned_response_text[:200]}...'")
         # 尝试“宽容”解析：找到最后一个 '}'，并假设它是一个完整的对象列表的结尾
         try:
             # 清理开头可能存在的非JSON字符
-            start_index = response_text.find('[')
+            start_index = cleaned_response_text.find('[')
             if start_index == -1:
-                logger.error("Lenient parsing failed: Could not find opening '[' in response.")
+                logger.debug("Lenient parsing failed: Could not find opening '[' in response.")
                 return
 
-            last_brace_index = response_text.rfind('}')
+            last_brace_index = cleaned_response_text.rfind('}')
             if last_brace_index != -1:
                 # 截取从第一个 '[' 到最后一个 '}' 的部分，并手动闭合数组
-                json_candidate = response_text[start_index : last_brace_index + 1]
+                json_candidate = cleaned_response_text[start_index : last_brace_index + 1]
                 # 有些模型可能会生成一个逗号在最后，先清理掉
                 if json_candidate.strip().endswith(','):
                     json_candidate = json_candidate.strip()[:-1]
@@ -127,11 +134,11 @@ def update_track_from_json_response(track: SubtitleTrack, response_text: str, lo
                 json_string = f"{json_candidate}]"
                 
                 parsed_data = json.loads(json_string)
-                logger.info(f"Successfully performed lenient parsing. Recovered {len(parsed_data)} items.")
+                logger.debug(f"Successfully performed lenient parsing. Recovered {len(parsed_data)} items.")
             else:
-                logger.error("Lenient parsing failed: Could not find any closing '}' in response.")
+                logger.debug("Lenient parsing failed: Could not find any closing '}' in response.")
         except json.JSONDecodeError as e:
-            logger.error(f"Lenient JSON parsing also failed: {e}. Raw text part: '{response_text[start_index : last_brace_index + 100]}...'")
+            logger.error(f"Lenient JSON parsing also failed: {e}. Raw text part: '{cleaned_response_text[start_index : last_brace_index + 100]}...'")
             # 如果宽容解析也失败了，就直接返回，让重试逻辑处理
             return
 
@@ -154,7 +161,7 @@ def update_track_from_json_response(track: SubtitleTrack, response_text: str, lo
             # 只更新文本，保留其他所有属性
             segment_map[segment_id].translated_text = translated_text
         else:
-            logger.warning(f"Segment ID '{segment_id}' from LLM response not found in track.")
+            logger.debug(f"Segment ID '{segment_id}' from LLM response not found in track.")
 
 def subtitle_track_to_json_tasks(
     segments: list[SubtitleSegment], 

@@ -203,9 +203,14 @@ async def execute_translation_async(
         logger_to_use.info("翻译任务成功完成。")
         return translated_results, raw_llm_log_strings
 
-    except ModelInitializationError as e:
-        logger_to_use.critical(f"无法执行翻译，因为模型初始化失败: {e}", exc_info=True)
-        return None, []
-    except Exception as e:
-        logger_to_use.critical(f"执行翻译期间发生意外错误: {e}", exc_info=True)
-        return None, []
+    except (ModelInitializationError, Exception) as e:
+        # 统一处理所有异常，包括凭证错误和模型初始化失败
+        logger_to_use = logger if logger else logging.getLogger(__name__)
+        # 根据异常类型定制日志消息
+        if isinstance(e, ModelInitializationError):
+            logger_to_use.critical(f"无法执行翻译，因为模型初始化失败: {e}", exc_info=True)
+        else:
+            logger_to_use.critical(f"无法执行翻译，因为模型初始化或执行期间发生意外错误: {e}", exc_info=True)
+        
+        # 修正：返回一个空列表而不是 None，以匹配函数签名
+        return [], []

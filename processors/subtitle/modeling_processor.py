@@ -31,19 +31,26 @@ class ModelingProcessor(BaseProcessor):
         try:
             # 1. 从“货箱”中取出需要的原材料
             segments_data = new_context.raw_segments
-            metadata = new_context.source_metadata
+            metadata = new_context.source_metadata or {} # 修正1：确保 metadata 不是 None
             source_lang = new_context.source_lang
             source_type = new_context.source_type
             
-            # 从元数据中获取唯一的轨道ID
-            track_id = metadata.get("video_id") or metadata.get("filename")
+            # 修正2: 确保关键元数据存在，否则中止
+            if not source_lang or not source_type:
+                new_context.is_successful = False
+                new_context.error_message = "Source language or source type is missing from context."
+                self.logger.error(new_context.error_message)
+                return new_context
+
+            # 从元数据中获取唯一的轨道ID, 并提供默认值
+            track_id = str(metadata.get("video_id") or metadata.get("filename") or "unknown_track") # 修正3：确保 track_id 是字符串
 
             # 2. 调用【现有】的核心逻辑：SubtitleTrack 的类方法
             subtitle_track = SubtitleTrack.from_segments(
                 segments_data=segments_data,
                 video_id=track_id,
                 source_lang=source_lang,
-                source_type=source_type
+                source_type=source_type # type: ignore
             )
             
             # 3. 将产出的新零件（subtitle_track）放回“货箱”

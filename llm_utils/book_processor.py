@@ -439,15 +439,10 @@ def _get_source_text_from_block(block: AnyBlock) -> str:
     if isinstance(block, (HeadingBlock, ParagraphBlock, ImageBlock)):
         return block.content_source
     elif isinstance(block, ListBlock):
-        # 简单地将所有列表项的源文连接起来
+        # 修正：直接从列表项的 content 中提取文本，而不是尝试将其序列化为块。
+        # item.content 对于 ListBlock 来说是 RichContentItem 的列表，可以直接字符串化。
         return " ".join(
-            html_mapper.get_plain_text(
-                BeautifulSoup(
-                    _serialize_blocks_to_html(item.content, BeautifulSoup('', 'html.parser')),
-                    'html.parser'
-                )
-            )
-            for item in block.items_source
+            str(item.content) for item in block.items_source
         )
     # 可以根据需要为其他块类型添加更多逻辑
     return ""

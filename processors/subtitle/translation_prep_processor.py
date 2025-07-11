@@ -25,12 +25,17 @@ class TranslationPrepProcessor(BaseProcessor):
         
         try:
             self.logger.info("Converting SubtitleTrack to batched JSON tasks for LLM...")
+            
+            # 修正1: 安全地获取元数据和 base_id
+            source_metadata = new_context.source_metadata or {}
+            base_id = str(source_metadata.get("video_id") or source_metadata.get("filename") or "unknown_task")
+
             # 【关键修复】将参数名从 'input_data' 改为 'segments'，
             # 以匹配 llm_utils/subtitle_processor.py 中更新后的函数签名。
             tasks = subtitle_track_to_json_tasks(
-                segments=new_context.subtitle_track.segments,
+                segments=track.segments, # 修正2: 使用已检查过的 'track' 变量
                 logger=self.logger,
-                base_id=new_context.source_metadata.get("video_id") or new_context.source_metadata.get("filename")
+                base_id=base_id
             )
             new_context.translation_tasks = tasks
             new_context.is_successful = True

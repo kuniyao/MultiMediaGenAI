@@ -38,6 +38,7 @@ class PipelineContext(BaseModel):
     glossary: Optional[Dict[str, str]] = None # EPUB流程需要的术语表
 
     # --- 流程控制与日志 ---
+    translation_errors: Dict[str, List[Dict[str, str]]] = Field(default_factory=dict)
     llm_logs: List[str] = Field(default_factory=list)
     is_successful: bool = True
     error_message: Optional[str] = None

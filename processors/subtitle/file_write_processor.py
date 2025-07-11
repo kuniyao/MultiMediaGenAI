@@ -5,6 +5,7 @@ from common_utils.output_manager import OutputManager
 from common_utils.file_helpers import sanitize_filename
 from pathlib import Path
 import logging
+import json
 
 class FileWriteProcessor(BaseProcessor):
     """
@@ -21,14 +22,15 @@ class FileWriteProcessor(BaseProcessor):
 
         self.logger.info("Writing final output to files...")
         try:
+            source_metadata = context.source_metadata or {}
             # 构造一个任务专用的输出管理器
-            sanitized_title = sanitize_filename(context.source_metadata.get("title", "untitled_task"))
+            sanitized_title = sanitize_filename(source_metadata.get("title", "untitled_task"))
             task_output_dir = Path(context.output_dir) / sanitized_title
             output_manager = OutputManager(str(task_output_dir), self.logger)
             
             # 写入 SRT 文件
             if context.final_srt_content:
-                file_basename = sanitize_filename(context.source_metadata.get("title", "translation"))
+                file_basename = sanitize_filename(source_metadata.get("title", "translation"))
                 srt_path = output_manager.get_workflow_output_path("subtitle", f"{file_basename}_{context.target_lang}.srt")
                 output_manager.save_file(srt_path, context.final_srt_content)
                 self.logger.info(f"Final SRT file saved to: {srt_path}")
@@ -46,6 +48,17 @@ class FileWriteProcessor(BaseProcessor):
                      self.logger.info(f"LLM raw response logs saved to: {log_file_path}")
                  except Exception as e:
                      self.logger.error(f"Failed to save LLM raw response logs: {e}", exc_info=True)
+
+            # 写入翻译错误日志
+            if context.translation_errors:
+                error_file_name = "translation_errors.json"
+                error_file_path = output_manager.get_workflow_output_path("source", error_file_name)
+                try:
+                    error_json_string = json.dumps(context.translation_errors, indent=4, ensure_ascii=False)
+                    output_manager.save_file(error_file_path, error_json_string)
+                    self.logger.info(f"Translation error log saved to: {error_file_path}")
+                except Exception as e:
+                    self.logger.error(f"Failed to save translation error log: {e}", exc_info=True)
 
         except Exception as e:
             self.logger.error(f"Failed during file writing process: {e}", exc_info=True)

@@ -30,13 +30,13 @@ graph TD;
         S2["<b>2. ModelingProcessor</b><br>创建SubtitleTrack对象"]
         S3["<b>3. TranslationPrepProcessor</b><br>创建翻译任务"]
         S4["<b>4. TranslationCoreProcessor</b><br>执行核心翻译与重试"]
-        S5["<b>5. OutputGenProcessor</b><br>生成SRT和MD文件内容"]
-        S6["<b>6. SubtitleFileWriteProcessor</b><br>写入最终文件"]
+        S5["<b>5. OutputGenProcessor</b><br>生成SRT文件内容"]
+        S6["<b>6. FileWriteProcessor</b><br>写入最终文件"]
     end
 
     subgraph Output [输出]
         H1[翻译后的 .srt 文件]
-        H2[翻译后的 .md 对照文件]
+        H2[LLM 原始响应日志 (.jsonl)]
     end
 
     A --> O1;
@@ -55,10 +55,10 @@ graph TD;
 -   **初始化**: `translate.py` 脚本接收命令行参数，并创建一个 `PipelineContext` 实例，填入初始信息如 `source_input` (文件路径或URL), `target_lang` 等。
 -   **数据获取 (`DataFetchProcessor`)**: 此处理器根据 `source_input` 的类型（本地文件或YouTube URL），获取原始字幕片段，并将片段列表（`list[dict]`）存入上下文的 `raw_segments` 字段。
 -   **数据建模 (`ModelingProcessor`)**: 此处理器读取 `raw_segments`，将其构建成一个强类型的 `SubtitleTrack` 对象，并存入上下文的 `subtitle_track` 字段。这是将不同来源的数据统一化的关键步骤。
--   **翻译任务准备 (`TranslationPrepProcessor`)**: 此处理器读取 `subtitle_track`，将其智能分批并序列化为带有 `data-id` 等元数据的HTML字符串，最后将生成的"翻译任务"列表存入 `translation_tasks` 字段。
--   **核心翻译 (`TranslationCoreProcessor`)**: 此处理器读取 `translation_tasks`，调用LLM进行翻译。它内部实现了强大的并发控制和重试机制（包括API层面和内容层面的错误处理），并将翻译结果（HTML字符串）存入 `translated_results` 字段。
--   **输出内容生成 (`OutputGenProcessor`)**: 此处理器读取 `subtitle_track` 和 `translated_results`。它首先将翻译结果HTML解析并精确更新回 `subtitle_track` 对象中。然后，它调用后处理逻辑，生成最终的SRT和Markdown文件内容，并分别存入 `final_srt_content` 和 `final_md_content` (假设字段存在) 字段。
--   **文件写入 (`SubtitleFileWriteProcessor`)**: 这是管道的最后一步。它从上下文中读取最终的SRT和Markdown内容，以及 `output_dir` 等元数据，将它们写入到文件系统中，完成整个工作流。
+-   **翻译任务准备 (`TranslationPrepProcessor`)**: **【核心变更】** 此处理器读取 `subtitle_track`，将其智能分批并序列化为包含片段 `id` 和 `source_text` 的JSON字符串，最后将生成的"翻译任务"列表存入 `translation_tasks` 字段。
+-   **核心翻译 (`TranslationCoreProcessor`)**: **【核心变更】** 此处理器读取 `translation_tasks`，调用LLM进行翻译。它内部实现了强大的并发控制和重试机制。在收到LLM返回的JSON结果后，它会**直接将翻译结果更新回 `subtitle_track` 对象中**，并将原始响应存入 `llm_logs` 列表。
+-   **输出内容生成 (`OutputGenProcessor`)**: **【核心变更】** 此处理器直接使用 `TranslationCoreProcessor` 已经更新完毕的 `subtitle_track` 对象。它调用后处理逻辑，生成最终的SRT文件内容，并存入 `final_srt_content` 字段。它不再需要进行解析或应用翻译结果的步骤。
+-   **文件写入 (`FileWriteProcessor`)**: 这是管道的最后一步。它从上下文中读取最终的SRT内容和LLM日志，以及 `output_dir` 等元数据，将它们写入到文件系统中，完成整个工作流。
 
 ---
 
@@ -97,66 +97,66 @@ graph TD;
 
 ### 3. `TranslationPrepProcessor`
 
-- **核心职责**: 将 `SubtitleTrack` 对象转换为适合LLM处理的批量HTML任务。
+- **核心职责**: 将 `SubtitleTrack` 对象转换为适合LLM处理的、可序列化的批量JSON任务。
 - **输入 (来自 `PipelineContext`)**: `subtitle_track`。
 - **输出 (写入 `PipelineContext`)**: `translation_tasks` (`list[dict]`)。
 
 **任务与逻辑**:
 1.  接收 `ModelingProcessor` 创建的 `SubtitleTrack` 对象。
 2.  根据Token限制将所有片段智能地划分为多个批次。
-3.  在分批时，每个片段的原文都被序列化为一段带有多层嵌套和 `data-id` 等元数据属性的HTML，确保LLM在翻译时不会破坏时间戳等关键信息。
-4.  输出一个 "翻译任务" 列表，其中每一项都包含了准备发往LLM的HTML字符串。
+3.  **【核心变更】**: 在分批时，每个片段的 `id` 和 `source_text` 被打包成一个JSON对象。多个这样的JSON对象组成一个列表，然后序列化成一个JSON字符串。
+4.  输出一个 "翻译任务" 列表，其中每一项都包含了准备发往LLM的、包含一批片段信息的JSON字符串。
 
 **关键内部实现**:
-- `llm_utils.subtitle_processor.subtitle_track_to_html_tasks`: 处理器直接调用此核心函数，该函数封装了将 `SubtitleTrack` 对象转换为批量HTML翻译任务的全部逻辑。
+- `llm_utils.subtitle_processor.subtitle_track_to_json_tasks`: 处理器直接调用此核心函数，该函数封装了将 `SubtitleTrack` 对象转换为批量JSON翻译任务的全部逻辑。
 
 ### 4. `TranslationCoreProcessor`
 
 - **核心职责**: 执行核心翻译，并内置强大的、多层次的重试机制。
 - **输入 (来自 `PipelineContext`)**: `translation_tasks`。
-- **输出 (写入 `PipelineContext`)**: `translated_results` (`list[str]`)。
+- **输出 (更新 `PipelineContext`)**: 直接在 `subtitle_track` 对象中更新翻译结果，并将LLM的原始日志存入 `llm_logs`。
 
 **任务与逻辑**:
 这是整个工作流最核心、最复杂的处理器之一，它确保了翻译的高成功率和高质量。
 
-1.  **Prompt工程**: 在构建API请求时，会为System Prompt注入明确的**安全规则**，指导LLM在无法翻译时返回一个特定格式 `[...]` 的、可被代码识别的标记，而不是陷入重复输出等错误状态。
+1.  **Prompt工程**: 在构建API请求时，会为System Prompt注入明确的**JSON格式要求和安全规则**，指导LLM在翻译后返回结构化的JSON数组（每个对象包含 `id` 和 `text` 字段），并在无法翻译时返回一个特定格式 `[...]` 的、可被代码识别的标记，而不是陷入重复输出等错误状态。
 2.  **API调用层面的重试**: 内部的API调用函数 `_call_gemini_api_async` 实现了指数退避重试，以处理瞬时的网络或API故障。
 3.  **工作流层面的智能重试**: 在批量翻译结束后，处理器会启动一轮"质检-返工"流程。
-    -   **错误分类**: 检查返回结果中是否有硬错误（如 `我我我...` 的重复文本或 `[...]` 标记）和软错误（其他失败）。
+    -   **错误分类**: **【核心变更】** 通过检查 `subtitle_track` 对象中哪些片段的 `translated_text` 仍然为空或包含失败标记，来识别失败的片段。
     -   **分而治之**: 将软错误重新打包进行**批量重试**，将硬错误**逐个、隔离地**进行重试，以避免"毒丸"片段污染其他任务。
     -   此循环最多进行3轮，极大地提升了最终翻译结果的质量和完整性。
 
 **关键内部实现**:
 - `llm_utils.translator.execute_translation_async`: 用于执行初翻和所有重试中的API调用。
-- `llm_utils.subtitle_processor.update_track_from_html_response`: 在收到翻译结果后，调用此函数将HTML格式的译文解析并更新回 `SubtitleTrack` 对象中。
+- `llm_utils.subtitle_processor.update_track_from_json_response`: **【核心变更】** 在收到翻译结果后，调用此函数将LLM返回的JSON格式译文解析，并根据 `id` 精确地更新回 `SubtitleTrack` 对象中。
 - `_handle_retries_internal`: 处理器内部的一个私有异步方法，完整地实现了包含"质检-返工"逻辑的工作流层面重试。
 
 ### 5. `OutputGenProcessor`
 
-- **核心职责**: 应用翻译结果，并进行后处理，生成最终的文件内容。
-- **输入 (来自 `PipelineContext`)**: `subtitle_track`, `translated_results`。
-- **输出 (写入 `PipelineContext`)**: `final_srt_content` (`str`), `final_md_content` (`str`)。
+- **核心职责**: 基于已翻译的 `SubtitleTrack` 对象，进行后处理，生成最终的文件内容。
+- **输入 (来自 `PipelineContext`)**: `subtitle_track`。
+- **输出 (写入 `PipelineContext`)**: `final_srt_content` (`str`)。
 
 **任务与逻辑**:
-1.  **应用结果**: 遍历 `translated_results`，调用 `subtitle_processor.update_track_from_html_response`，使用 `BeautifulSoup` 解析LLM返回的HTML，并根据 `data-id` 将译文精确地更新回 `subtitle_track` 对象中。
+1.  **【核心变更】**: 此处理器不再需要“应用”翻译结果，因为 `TranslationCoreProcessor` 已经直接更新了 `subtitle_track` 对象。
 2.  **生成SRT**: 将更新后的 `subtitle_track` 传给 `postprocessing.generate_post_processed_srt`。此函数会根据译文的标点和长度，对字幕片段进行再次拆分或合并，并重新计算时间码，以优化显示节奏和断行，最终生成SRT文件字符串。
-3.  **生成Markdown**: 将同一个 `subtitle_track` 传给 `markdown_handler.reconstruct_translated_markdown`，生成一个用于人工校对的双语对照Markdown文件字符串。
-4.  将生成的两个字符串存入上下文，供最后一个处理器使用。
+3.  **(可选) 生成Markdown**: 如果需要，可以将同一个 `subtitle_track` 传给 `markdown_handler` 中的相关函数，生成一个用于人工校对的双语对照Markdown文件。
+4.  将生成的SRT字符串存入上下文的 `final_srt_content` 字段，供最后一个处理器使用。
 
 **关键内部实现**:
 - `format_converters.postprocessing.generate_post_processed_srt`: 处理器调用此核心函数。该函数内部实现了复杂的后处理逻辑，如根据译文标点和长度重新拆分/合并字幕并计算时间码，以优化最终SRT文件的可读性。
-- `format_converters.markdown_handler.reconstruct_translated_markdown`: (如果需要生成MD文件) 调用此函数来生成双语对照的Markdown文件内容。
 
-### 6. `SubtitleFileWriteProcessor`
+### 6. `FileWriteProcessor`
 
 - **核心职责**: 将内存中的文件内容写入到磁盘。
-- **输入 (来自 `PipelineContext`)**: `final_srt_content`, `final_md_content`, `output_dir`, `source_metadata`。
-- **输出**: 在文件系统生成最终的 `.srt` 和 `.md` 文件。
+- **输入 (来自 `PipelineContext`)**: `final_srt_content`, `output_dir`, `source_metadata`。
+- **输出**: 在文件系统生成最终的 `.srt` 文件。
 
 **任务与逻辑**:
 1.  这是管道的终点。它从上下文中读取 `OutputGenProcessor` 生成的最终文件内容。
 2.  根据 `output_dir` 和 `source_metadata`（例如视频标题或原始文件名）构建最终的输出路径和文件名。
-3.  将SRT和Markdown字符串内容写入到对应的文件中，完成整个工作流。
+3.  将SRT字符串内容写入到对应的文件中，完成整个工作流。
+4.  **(新增)** 同时，它也会将 `llm_logs` 中的原始LLM响应日志写入一个 `.jsonl` 文件，方便调试和分析。
 
 **关键内部实现**:
 - `common_utils.output_manager.OutputManager`: 用于创建和管理具体任务的输出目录结构。

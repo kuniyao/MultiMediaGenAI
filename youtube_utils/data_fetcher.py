@@ -2,7 +2,9 @@ import logging
 import time
 import xml.etree.ElementTree as ET
 from pytubefix import YouTube
-from youtube_transcript_api import YouTubeTranscriptApi, NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript
+# 修正：根据linter建议，从内部模块导入
+from youtube_transcript_api._api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import NoTranscriptFound, TranscriptsDisabled, CouldNotRetrieveTranscript
 import config # Assuming config.py is in the PYTHONPATH or project root
 from format_converters.preprocessing import merge_segments_intelligently
 
@@ -90,6 +92,9 @@ def get_youtube_transcript(video_url_or_id, logger=None):
             logger_to_use.error(f"No suitable transcript found to fetch for video {video_id} even after listing available.")
             return None, None, None # No suitable transcript type found to even attempt fetching
 
+        except TranscriptsDisabled:
+            logger_to_use.error(f"Transcripts are disabled for video {video_id}.", exc_info=True)
+            return None, None, None # No point in retrying if disabled
         except (ET.ParseError, CouldNotRetrieveTranscript) as e: # Catch specific errors for retry
             last_exception = e
             logger_to_use.warning(f"Attempt {attempt + 1} to fetch transcript for {video_id} failed: {e}")
@@ -98,9 +103,6 @@ def get_youtube_transcript(video_url_or_id, logger=None):
                 time.sleep(retry_delay_seconds)
             else:
                 logger_to_use.error(f"All {max_retries + 1} attempts to fetch transcript for {video_id} failed.")
-        except TranscriptsDisabled:
-            logger_to_use.error(f"Transcripts are disabled for video {video_id}.", exc_info=True)
-            return None, None, None # No point in retrying if disabled
         except Exception as e: # Catch other unexpected errors from list_transcripts or other parts
             logger_to_use.error(f"An unexpected error occurred while trying to list/find transcript for {video_id} on attempt {attempt + 1}: {e}", exc_info=True)
             last_exception = e # Store it
