@@ -71,6 +71,8 @@ class GeminiClient(BaseLLMClient):
                 # 使用异步调用，并设置超时
                 response = await self.model.generate_content_async(messages, request_options={'timeout': 300})
                 raw_text = response.text
+                # 【诊断日志】 在进行任何处理之前，记录最原始的输出
+                # self.logger.error(f"DIAGNOSTIC LOG FOR {task_id} | RAW LLM OUTPUT: {raw_text}")
                 self.logger.debug(f"在第 {attempt + 1} 次尝试时收到任务 {task_id} 的响应。")
                 break  # 成功，退出重试循环
             except (google_exceptions.GoogleAPICallError, asyncio.TimeoutError) as e:

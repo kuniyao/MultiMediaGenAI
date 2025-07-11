@@ -2,23 +2,101 @@
 
 import json
 from typing import List, Dict, Optional, Any
+from pathlib import Path
 
-def create_glossary_section(glossary: Optional[Dict[str, str]], template: str) -> str:
-    """
-    If a glossary is provided, creates and formats the glossary section for the prompt.
-    """
-    if not glossary:
-        return ""
-    
-    glossary_items = "\n".join([f'* "{term}": "{translation}"' for term, translation in glossary.items()])
-    return template.format(glossary_items=glossary_items)
+# 全局的、预加载的提示词模板
+PROMPT_TEMPLATES = {}
 
+# 在文件顶部定义，以便在多个函数中使用
+PROMPT_CONFIG = {
+    'json_batch': {'system': 'json_batch_system_prompt', 'user': 'json_batch_user_prompt', 'var_name': 'json_task_string'},
+    'html_part': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': 'html_content'},
+    'json_subtitle_batch': {'system': 'json_subtitle_system_prompt', 'user': 'json_subtitle_user_prompt', 'var_name': "json_task_string"}
+}
+
+def _load_prompts():
+    """
+    私有函数，用于加载所有提示词模板到全局变量中。
+    """
+    global PROMPT_TEMPLATES
+    if PROMPT_TEMPLATES:
+        return
+
+    try:
+        # 定位到项目根目录下的 prompts.json 文件
+        # __file__ 指向当前文件 (prompt_builder.py)
+        # .parent 指向 llm_utils/
+        # .parent 指向项目根目录
+        prompt_file_path = Path(__file__).resolve().parent.parent / "prompts.json"
+        with open(prompt_file_path, 'r', encoding='utf-8') as f:
+            PROMPT_TEMPLATES = json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        # 在实际应用中，这里应该使用日志记录错误
+        print(f"Error loading prompts: {e}")
+        PROMPT_TEMPLATES = {}
+
+class PromptBuilder:
+    """
+    一个用于构建和管理发送给LLM的提示的类。
+    """
+    def __init__(self, source_lang: str, target_lang: str, glossary: Optional[Dict[str, str]] = None):
+        _load_prompts()
+        self.source_lang = source_lang
+        self.target_lang = target_lang
+        self.glossary = glossary
+        self.glossary_section = self._create_glossary_section()
+
+    def _create_glossary_section(self) -> str:
+        """
+        如果提供了术语表，则创建格式化的术语表部分。
+        """
+        if not self.glossary:
+            return ""
+        
+        template = PROMPT_TEMPLATES.get("glossary_injection_template", {}).get("content", "")
+        if not template:
+            return ""
+        
+        glossary_items = "\n".join([f'* "{term}": "{translation}"' for term, translation in self.glossary.items()])
+        return template.format(glossary_items=glossary_items)
+
+    def build_messages(self, task_type: str, task_string: str) -> List[Dict[str, Any]]:
+        """
+        根据任务类型构建最终的消息列表。
+        """
+        prompt_details = PROMPT_CONFIG.get(task_type)
+        if not prompt_details:
+            raise ValueError(f"No prompt configuration found for task type: {task_type}")
+
+        system_prompt_template = PROMPT_TEMPLATES.get(prompt_details['system'], {})
+        user_prompt_template = PROMPT_TEMPLATES.get(prompt_details['user'], {})
+        
+        variables = {
+            "source_lang": self.source_lang,
+            "target_lang": self.target_lang,
+            "glossary_section": self.glossary_section,
+            prompt_details['var_name']: task_string
+        }
+        
+        system_content = system_prompt_template.get('content', '').format(**variables)
+        user_content = user_prompt_template.get('content', '').format(**variables)
+        
+        # 为了兼容不同的模型，将 system prompt 的内容合并到 user prompt 的开头
+        full_user_content = f"{system_content}\n\n{user_content}".strip()
+        
+        messages = [
+            {"role": "user", "parts": [full_user_content]}
+        ]
+        
+        return messages
+
+# 保持此独立函数以实现向后兼容或用于其他简单场景
 def build_prompt_from_template(
     system_prompt_template: Optional[Dict[str, Any]], 
     user_prompt_template: Optional[Dict[str, Any]],
     variables: Dict[str, Any],
     glossary: Optional[Dict[str, str]] = None,
-    glossary_template: Optional[str] = None
+    glossary_template_content: Optional[str] = None # 接受模板内容而不是整个模板
 ) -> List[Dict[str, Any]]:
     """
     A generic prompt generator that creates a prompt from templates and variables,
@@ -27,9 +105,11 @@ def build_prompt_from_template(
     
     # Handle glossary
     glossary_section = ""
-    if glossary and glossary_template:
-        glossary_section = create_glossary_section(glossary, glossary_template)
-    
+    if glossary and glossary_template_content:
+        # 直接在这里处理术语表创建
+        glossary_items = "\n".join([f'* "{term}": "{translation}"' for term, translation in glossary.items()])
+        glossary_section = glossary_template_content.format(glossary_items=glossary_items)
+
     # Add the glossary section to the variables for formatting
     variables['glossary_section'] = glossary_section
     

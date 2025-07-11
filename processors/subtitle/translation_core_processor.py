@@ -2,7 +2,7 @@ from ..base_processor import BaseProcessor
 from workflows.dto import PipelineContext
 from format_converters.book_schema import SubtitleTrack
 from llm_utils.translator import execute_translation_async
-from llm_utils.subtitle_processor import update_track_from_html_response, subtitle_track_to_html_tasks
+from llm_utils.subtitle_processor import update_track_from_json_response, subtitle_track_to_json_tasks
 import asyncio
 import logging
 import re
@@ -44,10 +44,13 @@ class TranslationCoreProcessor(BaseProcessor):
             if not initial_results:
                  raise RuntimeError("Initial translation returned no results.")
 
+            # 【关键修改】现在 update_track_from_json_response 内部处理了解析错误，
+            # 因此这里不再需要 try/except 块。函数会尽力解析，并静默地跳过无法解析的批次。
+            # 后续的重试逻辑会自动捕获那些未被成功更新的片段。
             for result in initial_results:
-                update_track_from_html_response(track, result.get("translated_text", ""), self.logger)
+                update_track_from_json_response(track, result.get("translated_text", ""), self.logger)
             
-            self.logger.info("Initial translation applied. Starting retry and validation process...")
+            self.logger.info("Initial translation batch applied. Starting retry and validation process...")
             
             # 直接调用内部的异步重试逻辑
             retry_success, retry_logs = await self._handle_retries_internal(
@@ -97,24 +100,25 @@ class TranslationCoreProcessor(BaseProcessor):
             
             if soft_error_segments:
                 self.logger.warning(f"Found {len(soft_error_segments)} soft-error segments. Retrying as a batch...")
-                tasks = subtitle_track_to_html_tasks(soft_error_segments, self.logger, base_id=track_id)
+                tasks = subtitle_track_to_json_tasks(soft_error_segments, self.logger, base_id=track_id)
                 if tasks:
                     results, logs = await execute_translation_async(tasks, source_lang, target_lang, self.logger)
                     all_logs.extend(logs)
                     if results:
                         for r in results:
-                            update_track_from_html_response(subtitle_track, r.get("translated_text", ""), self.logger)
+                            update_track_from_json_response(subtitle_track, r.get("translated_text", ""), self.logger)
 
             if hard_error_segments:
                 self.logger.warning(f"Found {len(hard_error_segments)} hard-error segments. Retrying individually...")
                 for seg in hard_error_segments:
-                    tasks = subtitle_track_to_html_tasks([seg], self.logger, base_id=track_id)
+                    # 【保持一致】这里的调用是位置参数，已经和新的签名匹配，无需修改
+                    tasks = subtitle_track_to_json_tasks([seg], self.logger, base_id=track_id)
                     if tasks:
                         results, logs = await execute_translation_async(tasks, source_lang, target_lang, self.logger)
                         all_logs.extend(logs)
                         if results:
                             for r in results:
-                                update_track_from_html_response(subtitle_track, r.get("translated_text", ""), self.logger)
+                                update_track_from_json_response(subtitle_track, r.get("translated_text", ""), self.logger)
             
             remaining = [s for s in subtitle_track.segments if not s.translated_text or s.translated_text.startswith("[TRANSLATION_FAILED]")]
             if not remaining:
@@ -129,11 +133,23 @@ class TranslationCoreProcessor(BaseProcessor):
 
     def _is_repeated_text(self, text: str) -> bool:
         # 将原来 orchestrator._is_repeated_text 的代码移到这里
-        if not text: return False
+        if not text or len(text) < 10:  # 短文本不太可能出现有意义的重复
+            return False
+
+        # 规则1: 检测单个字符的重复 (例如 "aaaaa" 或 "......")
         if re.search(r"(.)\1{4,}", text, re.DOTALL):
-            self.logger.warning(f"Detected repeated text pattern in: '{text[:50]}...'")
+            self.logger.warning(f"Detected repeated single-character pattern in: '{text[:50]}...'")
             return True
+        
+        # 规则2: 【新增】检测词组的重复 (例如 "我认为，我认为，我认为，")
+        # 查找任何长度至少为2的非贪婪匹配字符串，如果它连续出现4次或以上
+        if re.search(r"(.{2,}?)\1{3,}", text, re.DOTALL):
+            self.logger.warning(f"Detected repeated phrase pattern in: '{text[:50]}...'")
+            return True
+
+        # 规则3: 检测模型明确表示无法翻译的文本 (例如 "[无法翻译]")
         if text.strip().startswith('[') and text.strip().endswith(']'):
             self.logger.warning(f"Detected LLM-reported untranslatable text: '{text[:50]}...'")
             return True
+            
         return False

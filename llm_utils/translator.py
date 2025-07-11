@@ -6,7 +6,7 @@ import config
 from pathlib import Path
 from dotenv import load_dotenv
 import asyncio
-from typing import Dict, Optional, Any, List, Tuple
+from typing import Dict, Optional, Any, List, Tuple, Coroutine
 
 # --- 新的导入 ---
 from .base_client import BaseLLMClient
@@ -14,11 +14,18 @@ from .gemini_client import GeminiClient
 # 在这里可以轻松地加入其他客户端
 # from .openai_client import OpenAIClient 
 
-from .prompt_builder import build_prompt_from_template
+from .prompt_builder import PromptBuilder # 仅导入 PromptBuilder
 
 # --- 全局设置 ---
 project_root = Path(__file__).resolve().parent.parent
 load_dotenv(dotenv_path=project_root / '.env')
+
+# 在文件顶部定义，以便在多个函数中使用
+PROMPT_CONFIG = {
+    'json_batch': {'system': 'json_batch_system_prompt', 'user': 'json_batch_user_prompt', 'var_name': 'json_task_string'},
+    'html_part': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': 'html_content'},
+    'json_subtitle_batch': {'system': 'json_subtitle_system_prompt', 'user': 'json_subtitle_user_prompt', 'var_name': "json_task_string"}
+}
 
 class ModelInitializationError(Exception):
     """用于模型初始化期间错误的自定义异常。"""
@@ -76,50 +83,35 @@ class Translator:
             self.logger.critical(f"加载或解析 prompts.json 失败: {e}")
             raise
 
-    async def translate_chapters_async(self, chapter_tasks: list, source_lang_code: str, target_lang: str, concurrency_limit: int, glossary: Optional[Dict[str, str]] = None) -> tuple[list, list]:
+    async def translate_chapters_async(
+        self, 
+        chapter_tasks: list, 
+        messages_list: List[List[Dict[str, Any]]], # 1. 接收预先构建好的消息列表
+        concurrency_limit: int
+    ) -> tuple[list, list]:
         """
         使用配置的 LLM 客户端并发翻译章节任务。
+        此版本直接使用预先构建好的消息。
         """
         if not self._is_initialized:
             await self.initialize()
 
         semaphore = asyncio.Semaphore(concurrency_limit)
         
-        async def translate_task(task):
+        # 将任务和消息配对
+        tasks_with_messages = list(zip(chapter_tasks, messages_list))
+
+        async def translate_task(task_with_message):
+            task, prompt_messages = task_with_message
             async with semaphore:
                 task_id = task['llm_processing_id']
-                task_type = task['source_data'].get('type')
+                self.logger.info(f"准备任务 (ID: {task_id})...")
                 
-                self.logger.info(f"准备任务 (ID: {task_id}, 类型: {task_type})...")
-                
-                # --- 构建 Prompt 的逻辑保持不变 ---
-                prompt_config = {
-                    'json_batch': {'system': 'json_batch_system_prompt', 'user': 'json_batch_user_prompt', 'var_name': "json_task_string"},
-                    'split_part': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': "html_content"},
-                    'fix_batch': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': "html_content"},
-                    'html_subtitle_batch': {'system': 'html_subtitle_system_prompt', 'user': 'html_subtitle_user_prompt', 'var_name': "html_content"}
-                }
-                config_for_type = prompt_config.get(task_type)
-                if not config_for_type:
-                    self.logger.warning(f"任务 ID {task_id} 的任务类型 '{task_type}' 未知。正在跳过。")
-                    return None, None
-
-                variables: Dict[str, Any] = {"source_lang": source_lang_code, "target_lang": target_lang}
-                variables[config_for_type['var_name']] = task['text_to_translate']
-
-                prompt_messages = build_prompt_from_template(
-                    self.prompts.get(config_for_type['system']),
-                    self.prompts.get(config_for_type['user']),
-                    variables,
-                    glossary,
-                    self.prompts.get('glossary_injection_template')
-                )
-                
-                # --- 调用通用客户端 ---
+                # 2. 直接使用传入的消息，不再重新构建
                 return await self.client.call_api_async(prompt_messages, task_id)
 
-        # 创建并执行所有异步任务
-        async_tasks = [translate_task(task) for task in chapter_tasks]
+        # 3. 为配对好的任务创建异步tasks
+        async_tasks = [translate_task(item) for item in tasks_with_messages]
         self.logger.info(f"正在以 {concurrency_limit} 的并发限制执行 {len(async_tasks)} 个翻译任务...")
         api_responses_tuples = await asyncio.gather(*async_tasks, return_exceptions=True)
         self.logger.info("所有并发任务已完成。")
@@ -152,36 +144,61 @@ class Translator:
         return translated_results, raw_llm_log_strings
 
 async def execute_translation_async(
-    tasks_to_translate: list, 
-    source_lang_code: str, 
-    target_lang: str, 
-    logger: logging.Logger | None = None,
-    concurrency: int = 5,
-    glossary: Optional[Dict[str, str]] = None,
-    # 新增参数，用于选择客户端
-    client_name: str = "gemini"
-) -> tuple[list | None, list]:
+    tasks_to_translate: List[Dict[str, Any]],
+    source_lang_code: str,
+    target_lang: str,
+    logger: logging.Logger
+) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     logger_to_use = logger if logger else logging.getLogger(__name__)
     
     try:
         # 实例化 Translator 时传入客户端名称
-        translator = Translator(logger=logger_to_use, client_name=client_name)
+        translator = Translator(logger=logger_to_use, client_name="gemini") # 假设默认使用 gemini
         # 异步初始化
         await translator.initialize()
 
         logger_to_use.info(f"开始对 {len(tasks_to_translate)} 个任务进行从 '{source_lang_code}' 到 '{target_lang}' 的异步翻译...")
         
+        # 使用新的 PromptBuilder 构建所有需要的提示
+        try:
+            builder = PromptBuilder(source_lang_code, target_lang)
+            
+            # 识别任务类型并构建消息
+            first_task_id = tasks_to_translate[0].get("llm_processing_id", "")
+            
+            task_type = "unknown"
+            if "json_subtitle_batch" in first_task_id:
+                task_type = "json_subtitle_batch"
+            elif "json_batch" in first_task_id:
+                task_type = "json_batch"
+            elif "html_part" in first_task_id:
+                task_type = "html_part"
+
+            if task_type == "unknown":
+                raise ValueError(f"Could not determine task type from ID: {first_task_id}")
+
+            messages_to_send = [
+                builder.build_messages(
+                    task_type=task_type,
+                    task_string=task['text_to_translate']
+                )
+                for task in tasks_to_translate
+            ]
+            logger_to_use.info(f"Successfully built {len(messages_to_send)} message sets for task type '{task_type}'.")
+        except Exception as e:
+            logger_to_use.error(f"Failed to build prompts for translation: {e}", exc_info=True)
+            return [], [{"task_id": "all", "error": str(e), "success": False}]
+
+        # 4. 将构建好的消息传递给底层函数
         translated_results, raw_llm_log_strings = await translator.translate_chapters_async(
             chapter_tasks=tasks_to_translate,
-            source_lang_code=source_lang_code,
-            target_lang=target_lang,
-            concurrency_limit=concurrency,
-            glossary=glossary
+            messages_list=messages_to_send, # 传递消息
+            concurrency_limit=5
         )
 
         if not translated_results:
             logger_to_use.error("翻译失败或未返回任何结果。")
-            return None, raw_llm_log_strings
+            return [], raw_llm_log_strings
         
         logger_to_use.info("翻译任务成功完成。")
         return translated_results, raw_llm_log_strings
