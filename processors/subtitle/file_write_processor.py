@@ -1,68 +1,69 @@
-# 处理器6：写入文件
-from ..base_processor import BaseProcessor
-from workflows.dto import PipelineContext
-from common_utils.output_manager import OutputManager
-from common_utils.file_helpers import sanitize_filename
-from pathlib import Path
+# processors/subtitle/file_write_processor.py
+
 import logging
+from pathlib import Path
 import json
 
-class FileWriteProcessor(BaseProcessor):
+from genai_processors import processor
+from workflows.parts import TranslatedTextPart
+from common_utils.output_manager import OutputManager
+from common_utils.file_helpers import sanitize_filename
+
+
+class FileWriterProcessor(processor.Processor):
     """
-    处理器第六步（终点）：将最终生成的内容写入文件，处理文件IO的副作用。
+    一個接收包含翻譯文本和元數據的 Part，並將內容寫入目標文件的處理器。
     """
-    def __init__(self, logger: logging.Logger):
-        self.logger = logger
 
-    def process(self, context: PipelineContext) -> PipelineContext:
-        # 这是管道的终点，可以直接修改上下文，无需创建副本
-        if not context.is_successful:
-            self.logger.warning("Skipping file writing because the pipeline failed in a previous step.")
-            return context
+    def __init__(self, output_dir: str | Path):
+        super().__init__()
+        self.output_dir = Path(output_dir)
+        self.logger = logging.getLogger(__name__)
 
-        self.logger.info("Writing final output to files...")
-        try:
-            source_metadata = context.source_metadata or {}
-            # 构造一个任务专用的输出管理器
-            sanitized_title = sanitize_filename(source_metadata.get("title", "untitled_task"))
-            task_output_dir = Path(context.output_dir) / sanitized_title
-            output_manager = OutputManager(str(task_output_dir), self.logger)
-            
-            # 写入 SRT 文件
-            if context.final_srt_content:
-                file_basename = sanitize_filename(source_metadata.get("title", "translation"))
-                srt_path = output_manager.get_workflow_output_path("subtitle", f"{file_basename}_{context.target_lang}.srt")
-                output_manager.save_file(srt_path, context.final_srt_content)
-                self.logger.info(f"Final SRT file saved to: {srt_path}")
+    async def call(self, stream):
+        """
+        處理傳入的數據流，並根據 Part 中的信息寫入文件。
+        """
+        async for part in stream:
+            # 我們只關心包含最終翻譯結果的 Part
+            if not isinstance(part, TranslatedTextPart):
+                yield part  # 將不處理的 Part 直接傳遞下去
+                continue
 
-            # 可以在这里扩展，比如写入最终的 Markdown 对照文件等
-            
-            # 写入LLM日志（如果需要）
-            if context.llm_logs: # 这里可以根据配置增加更复杂的判断逻辑
-                 log_file_name = f"llm_raw_responses_{context.target_lang.lower().replace('-','').replace('_','')}.jsonl"
-                 log_file_path = output_manager.get_workflow_output_path("llm_logs", log_file_name)
-                 try:
-                     with open(log_file_path, 'w', encoding='utf-8') as f:
-                         for log_entry in context.llm_logs:
-                             f.write(log_entry + '\n')
-                     self.logger.info(f"LLM raw response logs saved to: {log_file_path}")
-                 except Exception as e:
-                     self.logger.error(f"Failed to save LLM raw response logs: {e}", exc_info=True)
+            try:
+                metadata = part.metadata
+                # 從元數據中獲取文件名或標題
+                # 這是為了保持與舊邏輯的兼容性
+                title = metadata.get("title", "untitled")
+                sanitized_title = sanitize_filename(title)
+                
+                # 構造特定於該任務的輸出管理器
+                task_output_dir = self.output_dir / sanitized_title
+                output_manager = OutputManager(str(task_output_dir), self.logger)
 
-            # 写入翻译错误日志
-            if context.translation_errors:
-                error_file_name = "translation_errors.json"
-                error_file_path = output_manager.get_workflow_output_path("source", error_file_name)
-                try:
-                    error_json_string = json.dumps(context.translation_errors, indent=4, ensure_ascii=False)
-                    output_manager.save_file(error_file_path, error_json_string)
-                    self.logger.info(f"Translation error log saved to: {error_file_path}")
-                except Exception as e:
-                    self.logger.error(f"Failed to save translation error log: {e}", exc_info=True)
+                # 確定輸出文件名
+                # 這裡我們假設元數據中會提供原始文件名或一個基礎名
+                original_file_path = Path(metadata.get("original_file", "output.txt"))
+                original_filename = original_file_path.stem
+                target_lang = metadata.get("target_lang", "lang")
+                
+                # 構建最終的文件名，例如 "my_document_fr.txt"
+                output_filename = f"{original_filename}_{target_lang}{original_file_path.suffix}"
+                
+                # 獲取完整的輸出路徑
+                # 這裡我們假設所有翻譯文件都存放在 'translations' 子目錄中
+                output_path = output_manager.get_workflow_output_path(
+                    "translations", 
+                    output_filename
+                )
 
-        except Exception as e:
-            self.logger.error(f"Failed during file writing process: {e}", exc_info=True)
-            context.is_successful = False
-            context.error_message = f"File writing failed: {e}"
+                # 寫入文件
+                output_manager.save_file(output_path, part.translated_text)
+                self.logger.info(f"成功將翻譯���容寫入到: {output_path}")
 
-        return context
+                # 將原始的 Part 傳遞下去，表示處理完成
+                yield part
+
+            except Exception as e:
+                self.logger.error(f"寫入文件時出錯 (metadata: {part.metadata}): {e}", exc_info=True)
+                # 發生錯誤時，不傳遞任何 Part

@@ -10,7 +10,7 @@ PROMPT_TEMPLATES = {}
 # 在文件顶部定义，以便在多个函数中使用
 PROMPT_CONFIG = {
     'json_batch': {'system': 'json_batch_system_prompt', 'user': 'json_batch_user_prompt', 'var_name': 'json_task_string'},
-    'html_part': {'system': 'html_split_part_system_prompt', 'user': 'html_split_part_user_prompt', 'var_name': 'html_content'},
+    'text_file': {'system': 'text_file_system_prompt', 'user': 'text_file_user_prompt', 'var_name': 'text_content'},
     'json_subtitle_batch': {'system': 'json_subtitle_system_prompt', 'user': 'json_subtitle_user_prompt', 'var_name': "json_task_string"}
 }
 
@@ -209,7 +209,7 @@ def build_book_translation_prompt(
 
     # 2. 如果有术语表，则添加术语表部分
     if glossary:
-        glossary_items = "\n".join([f'* "{term}": "{translation}"' for term, translation in glossary.items()])
+        glossary_items = "\n".join([f'* \"{term}\": \"{translation}\"' for term, translation in glossary.items()])
         glossary_section = f"# GLOSSARY (Optional but highly recommended)\nUse the following terms and names consistently. Do not translate them differently.\n{glossary_items}"
         prompt_parts.append(glossary_section)
 
@@ -231,7 +231,7 @@ def build_json_batch_translation_prompt(json_task_string: str, source_lang: str,
     【新增函數】
     為包含多個章節HTML的JSON批處理任務構建一個強大的Prompt。
     """
-    # 為了示例，我們創建一個小的偽JSON，以展示結構
+    # 為了示例，我們創建一個小的���JSON，以展示結構
     example_input = [
         {"id": "text/part0001.html", "html_content": "<h1>Chapter 1</h1><p>This is the <b>first</b> chapter.</p>"},
         {"id": "text/part0002.html", "html_content": "<p>A short second chapter.</p>"}
@@ -271,29 +271,24 @@ Now, please process the following JSON data according to all the rules above. Tr
 """
     return prompt.strip()
 
-def build_html_translation_prompt(html_content: str, source_lang: str, target_lang: str) -> str:
+def build_text_file_translation_prompt(text_content: str, source_lang: str, target_lang: str) -> str:
     """
-    (This function remains unchanged, useful for the 'split' chapter parts.)
+    A simple prompt for translating a block of plain text.
     """
     prompt = f"""
 # ROLE & GOAL
-You are an expert translator specializing in translating HTML documents from {source_lang} to {target_lang}. Your task is to translate the user-provided HTML content while perfectly preserving its structure.
+You are an expert translator. Your task is to translate the following text from {source_lang} to {target_lang}.
 
 # CRITICAL RULES
-1.  PRESERVE ALL TAGS: You MUST keep all HTML tags (e.g., `<p>`, `<h1>`, `<i>`, `<span class="foo">`) and their attributes (`class`, `id`, `href`, etc.) completely unchanged.
-2.  TRANSLATE ONLY TEXT: Only translate the human-readable text content that appears between the HTML tags. Do not translate tag names or attribute values.
-3.  MAINTAIN STRUCTURE: The output MUST be a single, valid HTML document with the exact same structure as the input. Do not add, remove, or reorder any HTML elements.
-4.  JSON OUTPUT: You MUST respond with a single, valid JSON object containing one key: "translated_html". The value of this key should be the complete translated HTML string.
-
-# EXAMPLE
--   INPUT HTML: `<p class="title">The <b>Quick</b> Brown Fox</p>`
--   EXPECTED JSON OUTPUT: `{{"translated_html": "<p class=\\"title\\">敏捷的<b>棕色</b>狐狸</p>"}}`
+1.  Translate the entire text provided by the user.
+2.  Do not add any extra commentary, greetings, or explanations.
+3.  Your output should only be the translated text.
 
 # TASK
-Now, please translate the following HTML content from {source_lang} to {target_lang}.
+Translate the following text from {source_lang} to {target_lang}:
 
---- START OF HTML CONTENT ---
-{html_content}
---- END OF HTML CONTENT ---
+--- START OF TEXT ---
+{text_content}
+--- END OF TEXT ---
 """
-    return prompt
+    return prompt.strip()

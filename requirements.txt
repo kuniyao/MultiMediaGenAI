@@ -11,3 +11,6 @@ pytubefix
 pydantic
 ebooklib
 beautifulsoup4
+genai-processors
+pytest
+pytest-asyncio

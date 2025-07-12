@@ -1,53 +1,49 @@
 import logging
-from ..base_processor import BaseProcessor
-from workflows.dto import PipelineContext
-# 导入你现有的、功能强大的核心函数
-from llm_utils.book_processor import extract_translatable_chapters
+from genai_processors import processor
+from workflows.book.parts import EpubBookPart, ChapterPart
 
-class ChapterExtractionProcessor(BaseProcessor):
+class ChapterExtractionProcessor(processor.Processor):
     """
-    处理器第二步：从 Book 对象中提取可翻译的内容，并智能打包成翻译任务。
-    它封装了拆分大章节和批处理小章节的复杂逻辑。
+    一個接收 EpubBookPart，並為書中每個章節產生一個 ChapterPart 的處理器。
     """
-    def __init__(self, logger: logging.Logger, max_chapters: int = None):
-        self.logger = logger
-        self.max_chapters = max_chapters # 用于测试时限制章节数量
+    def __init__(self, max_chapters: int = None):
+        self.logger = logging.getLogger(__name__)
+        self.max_chapters = max_chapters
 
-    def process(self, context: PipelineContext) -> PipelineContext:
+    async def call(self, stream):
         """
-        接收包含 original_book 的上下文，返回填充了 translation_tasks 的新上下文。
+        處理傳入的數據流。
         """
-        new_context = context.model_copy(deep=True)
+        async for part in stream:
+            if not isinstance(part, EpubBookPart):
+                self.logger.warning(f"ChapterExtractionProcessor received an unexpected part type: {type(part)}")
+                yield part
+                continue
 
-        if not new_context.is_successful or not new_context.original_book:
-            return new_context
-
-        self.logger.info("Extracting translatable chapters into tasks...")
-        try:
-            # 1. 从“货箱”中取出 Book 对象
-            book = new_context.original_book
+            self.logger.info(f"Extracting chapters from book: {part.title}")
             
-            # 2. 调用【现有】的核心功能函数
-            # 这个函数内部已经包含了所有智能拆分和打包的逻辑
-            translatable_tasks = extract_translatable_chapters(book, self.logger)
-
-            if not translatable_tasks:
-                self.logger.warning("No translatable content found in the book. The pipeline will finish early.")
-                # 这不是一个硬性错误，只是说明书是空的，所以我们让流程继续，它会在后续步骤自然结束。
-                return new_context
-
-            # (可选) 根据用户运行时提供的参数，截取需要翻译的任务数量，这在调试时非常有用
+            chapters_to_process = part.chapters
             if self.max_chapters and self.max_chapters > 0:
-                self.logger.info(f"Limiting translation to the first {self.max_chapters} tasks as requested.")
-                translatable_tasks = translatable_tasks[:self.max_chapters]
+                self.logger.info(f"Limiting to the first {self.max_chapters} chapters.")
+                chapters_to_process = chapters_to_process[:self.max_chapters]
 
-            # 3. 将产出的任务列表放回“货箱”
-            new_context.translation_tasks = translatable_tasks
-            self.logger.info(f"Successfully extracted and prepared {len(translatable_tasks)} translation task(s).")
+            for chapter_data in chapters_to_process:
+                try:
+                    # 創建並產生一個 ChapterPart
+                    yield ChapterPart(
+                        chapter_id=chapter_data["id"],
+                        title=chapter_data.get("title", "Untitled Chapter"), # 假設 title 可能不存在
+                        html_content=chapter_data["content"],
+                        # 將書籍的元數據和原始 Part 的元數據合併後傳遞下去
+                        metadata={
+                            "book_title": part.title,
+                            "book_author": part.author,
+                            **part.metadata
+                        }
+                    )
+                except KeyError as e:
+                    self.logger.error(f"Chapter data is missing a required key: {e}. Data: {chapter_data}")
+                except Exception as e:
+                    self.logger.error(f"Error creating ChapterPart: {e}", exc_info=True)
 
-        except Exception as e:
-            self.logger.error(f"Chapter extraction failed: {e}", exc_info=True)
-            new_context.is_successful = False
-            new_context.error_message = f"Chapter extraction failed: {e}"
-            
-        return new_context
+            self.logger.info(f"Successfully extracted {len(chapters_to_process)} chapters.")

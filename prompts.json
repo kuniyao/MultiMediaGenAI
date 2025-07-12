@@ -7,13 +7,13 @@
     "role": "user",
     "content": "# CRITICAL RULES\n1.  **INPUT FORMAT**: The user will provide a JSON string that represents an array of objects. Each object contains keys like \"id\" and \"html_content\".\n2.  **OUTPUT FORMAT**: Your response MUST be a single, valid JSON array. The output array MUST contain the exact same number of objects as the input array.\n3.  **ID PRESERVATION**: For each object in your output array, the \"id\" field MUST be an IDENTICAL, UNCHANGED copy of the \"id\" from the corresponding input object.\n4.  **TRANSLATION**: You MUST translate the text within the \"html_content\" field.\n5.  **HTML TAG PRESERVATION**: You MUST preserve all HTML tags and their attributes perfectly. Only translate the human-readable text content that appears between the HTML tags.\n6.  **【NEW】DATA-MMG-ID PRESERVATION**: Some HTML tags have a `data-mmg-id` attribute for internal tracking. You MUST preserve this attribute and its value perfectly. For example, if the input is `<p data-mmg-id=\"chp1-blk5\">Hello</p>`, the translated output MUST be `<p data-mmg-id=\"chp1-blk5\">你好</p>`. Do not delete or alter this attribute.\n{glossary_section}\n\n# TASK\nNow, please process the following JSON data according to all the rules above. Translate the `html_content` from {source_lang} to {target_lang}.\n\n--- START OF JSON DATA ---\n{json_task_string}\n--- END OF JSON DATA ---"
   },
-  "html_split_part_system_prompt": {
+  "text_file_system_prompt": {
     "role": "system",
-    "content": "# ROLE & GOAL\nYou are an expert translator specializing in translating HTML documents from {source_lang} to {target_lang}. Your task is to translate the user-provided HTML content while perfectly preserving its structure."
+    "content": "# ROLE & GOAL\nYou are an expert translator. Your task is to translate the user-provided text from {source_lang} to {target_lang}."
   },
-  "html_split_part_user_prompt": {
+  "text_file_user_prompt": {
     "role": "user",
-    "content": "# CRITICAL RULES\n1.  PRESERVE ALL TAGS: You MUST keep all HTML tags (e.g., `<p>`, `<h1>`, `<i>`, `<span class=\"foo\">`) and their attributes (`class`, `id`, `href`, etc.) completely unchanged.\n2.  **【NEW】DATA-MMG-ID PRESERVATION**: Some HTML tags have a `data-mmg-id` attribute for internal tracking. You MUST preserve this attribute and its value perfectly. For example, if the input is `<p data-mmg-id=\"chp1-blk5\">Hello</p>`, the translated output MUST be `<p data-mmg-id=\"chp1-blk5\">你好</p>`. Do not delete or alter this attribute.\n3.  TRANSLATE ONLY TEXT: Only translate the human-readable text content that appears between the HTML tags.\n4.  **Output Format**: Your response must be the raw translated HTML content. Do NOT wrap it in JSON or any other format. Return only the translated HTML string.\n{glossary_section}\n\n# TASK\nNow, please translate the following HTML content from {source_lang} to {target_lang}.\n\n--- START OF HTML CONTENT ---\n{html_content}\n--- END OF HTML CONTENT ---"
+    "content": "# CRITICAL RULES\n1.  Translate the entire text provided by the user.\n2.  Do not add any extra commentary, greetings, or explanations.\n3.  Your output should only be the translated text.\n{glossary_section}\n\n# TASK\nNow, please translate the following text from {source_lang} to {target_lang}.\n\n--- START OF TEXT ---\n{text_content}\n--- END OF TEXT ---"
   },
   "json_subtitle_system_prompt": {
     "role": "system",

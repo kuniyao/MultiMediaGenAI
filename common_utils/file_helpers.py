@@ -10,25 +10,34 @@ from format_converters.time_utils import format_time
 def sanitize_filename(filename):
     """
     Sanitizes a string to be a valid filename.
-    Removes or replaces invalid characters.
+    Converts to lowercase, replaces spaces with hyphens, and removes invalid characters.
     """
     if not filename:
         return "untitled"
-    # Replace problematic characters with underscores
-    valid_chars = "-_.() %s%s" % (string.ascii_letters, string.digits)
-    sanitized_name = ''.join(c if c in valid_chars else '_' for c in filename)
-    # Replace multiple underscores with a single one
-    sanitized_name = re.sub(r'__+', '_', sanitized_name)
-    # Remove leading/trailing underscores or spaces
-    sanitized_name = sanitized_name.strip('_ ')
+    
+    # Convert to lowercase and replace spaces with hyphens
+    filename = filename.lower().replace(' ', '-')
+    
+    # Keep only a-z, 0-9, underscore, hyphen, and period
+    valid_chars = string.ascii_lowercase + string.digits + "-_."
+    sanitized_name = ''.join(c for c in filename if c in valid_chars)
+    
+    # Replace multiple hyphens/underscores with a single hyphen
+    sanitized_name = re.sub(r'[-_]+', '-', sanitized_name)
+    
+    # Remove leading/trailing hyphens or underscores
+    sanitized_name = sanitized_name.strip('-_')
+    
     # Limit length (optional, but good practice)
     max_len = 100
     if len(sanitized_name) > max_len:
-        sanitized_name = sanitized_name[:max_len].rsplit('_', 1)[0] # try to cut at a separator
-        if not sanitized_name : # if rsplit removed everything
-             sanitized_name = filename[:max_len//2] # fallback to a hard cut of original
+        sanitized_name = sanitized_name[:max_len]
+        # Ensure it doesn't end with a hyphen
+        sanitized_name = sanitized_name.rsplit('-', 1)[0]
+
     if not sanitized_name: # If all else fails
-        return "untitled_video"
+        return "untitled"
+        
     return sanitized_name
 
 def save_to_file(content, filename, logger=None):

@@ -1,39 +1,45 @@
-import os
-from pathlib import Path
-from typing import List, Dict, Any, Tuple
+import logging
+from genai_processors import processor
+from workflows.parts import TranslationRequestPart
 
-from .base_source import SegmentedDataSource
-from format_converters import load_and_merge_srt_segments
 
-class LocalFileSource(SegmentedDataSource):
+class LocalFileSource(processor.Processor):
     """
-    Data source implementation for handling local SRT files.
+    一個接收包含文件路徑的 TranslationRequestPart，讀取文件內容，
+    並產生一個新的、包含了文件內容的 TranslationRequestPart 的處理器。
     """
-    def __init__(self, file_path: str, logger):
-        self.file_path = Path(file_path)
-        self.logger = logger
-        if not self.file_path.is_file():
-            self.logger.error(f"File not found: {self.file_path}")
-            raise FileNotFoundError(f"The specified file was not found: {self.file_path}")
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
 
-    def get_segments(self) -> Tuple[List[Dict[str, Any]], str, str]:
+    async def call(self, stream):
         """
-        Loads segments from the local SRT file and processes them.
+        處理傳入的數據流。
         """
-        self.logger.info(f"Processing local file source: {self.file_path}")
-        # Here we use our robust, intelligent merging function
-        merged_segments = load_and_merge_srt_segments(self.file_path, self.logger)
-        if not merged_segments:
-            return [], "unknown", "local_file"
-        
-        # For local files, we assume the language is unknown and let the translator detect it.
-        return merged_segments, "auto", "local_srt_file"
+        async for part in stream:
+            if not isinstance(part, TranslationRequestPart):
+                self.logger.warning(f"LocalFileSource received an unexpected part type: {type(part)}")
+                yield part
+                continue
 
-    def get_metadata(self) -> Dict[str, Any]:
-        """
-        Extracts metadata from the file path.
-        """
-        return {
-            "title": self.file_path.stem,
-            "filename": self.file_path.name
-        }
+            file_path = part.text_to_translate
+            self.logger.info(f"Reading file from path: {file_path}")
+
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # 創建一個新的 Part，用文件內容替換掉路徑
+                # 同時保留所有原始的語言和元數據信息
+                yield TranslationRequestPart(
+                    text_to_translate=content,
+                    source_lang=part.source_lang,
+                    target_lang=part.target_lang,
+                    metadata=part.metadata
+                )
+                self.logger.info(f"Successfully read file '{file_path}' and yielded content.")
+
+            except FileNotFoundError:
+                self.logger.error(f"File not found at {file_path}")
+                # 在這裡可以選擇產生一個 ErrorPart
+            except Exception as e:
+                self.logger.error(f"Error reading file {file_path}: {e}", exc_info=True)
