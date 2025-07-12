@@ -10,109 +10,106 @@ from format_converters.preprocessing import merge_segments_intelligently
 
 # Placeholder for YouTube data fetching logic
 
+def get_video_id(url_or_id):
+    """
+    Extracts the video ID from a YouTube URL or returns the ID if it's already an ID.
+    """
+    if "youtube.com/watch?v=" in url_or_id:
+        return url_or_id.split("watch?v=")[1].split("&")[0]
+    elif "youtu.be/" in url_or_id:
+        return url_or_id.split("youtu.be/")[1].split("?")[0]
+    # Assume it's already an ID if no URL format matches
+    return url_or_id
+
+def _find_transcript(transcript_list, lang_codes, is_generated):
+    """
+    A helper function to find a transcript for a given list of language codes.
+    """
+    find_method = transcript_list.find_generated_transcript if is_generated else transcript_list.find_manually_created_transcript
+    try:
+        return find_method(lang_codes)
+    except NoTranscriptFound:
+        return None
+
+def _find_best_transcript_for_video(transcript_list, video_id, logger):
+    """
+    Finds the best available transcript based on a prioritized search strategy.
+    
+    The strategy is as follows:
+    1. Manually created transcript in preferred languages.
+    2. Auto-generated transcript in preferred languages.
+    3. First available manually created transcript in any language.
+    4. First available auto-generated transcript in any language.
+    """
+    preferred_langs = config.PREFERRED_TRANSCRIPT_LANGUAGES
+    
+    # Search definitions: (description, is_generated, languages_to_try)
+    search_attempts = [
+        ("manual transcript in preferred languages", False, preferred_langs),
+        ("auto-generated transcript in preferred languages", True, preferred_langs),
+        ("first available manual transcript", False, list(transcript_list._manually_created_transcripts.keys())[:1]),
+        ("first available auto-generated transcript", True, list(transcript_list._generated_transcripts.keys())[:1])
+    ]
+
+    for description, is_generated, langs in search_attempts:
+        if not langs:
+            continue
+            
+        logger.debug(f"Attempting to find {description} for video {video_id}...")
+        transcript = _find_transcript(transcript_list, langs, is_generated)
+        if transcript:
+            transcript_type = "generated" if is_generated else "manual"
+            logger.debug(f"Success: Found {transcript_type} transcript in '{transcript.language_code}'.")
+            return transcript, transcript.language_code, transcript_type
+            
+    logger.warning(f"No suitable transcript found for video {video_id} after checking all options.")
+    return None, None, None
+
+
 def get_youtube_transcript(video_url_or_id, logger=None):
     """
-    Fetches the transcript for a given YouTube video ID or URL.
-    Prioritizes manually created transcripts, then falls back to generated ones.
-    Languages are prioritized based on config.py, then any available.
-    Includes a retry mechanism for fetching.
+    Fetches the transcript for a given YouTube video with a retry mechanism.
+    
+    This function orchestrates the process of finding and fetching the best
+    available transcript by delegating the selection logic.
     """
     logger_to_use = logger if logger else logging.getLogger(__name__)
-    max_retries = 2  # Retry up to 2 times after the initial attempt (total 3 attempts)
+    max_retries = 2
     retry_delay_seconds = 5 
-
-    video_id = video_url_or_id
-    if "youtube.com/watch?v=" in video_url_or_id:
-        video_id = video_url_or_id.split("watch?v=")[1].split("&")[0]
-    elif "youtu.be/" in video_url_or_id:
-        video_id = video_url_or_id.split("youtu.be/")[1].split("?")[0]
-
-    last_exception = None # To store the last exception if all retries fail
+    video_id = get_video_id(video_url_or_id)
+    last_exception = None
 
     for attempt in range(max_retries + 1):
         try:
+            logger_to_use.debug(f"Attempt {attempt + 1}/{max_retries + 1} to list transcripts for {video_id}")
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
             
-            preferred_langs = config.PREFERRED_TRANSCRIPT_LANGUAGES
-            if attempt == 0: # Log initial attempt only once
-                logger_to_use.debug(f"Attempting to find manual transcript in preferred languages: {preferred_langs} for video {video_id}")
+            transcript, lang, transcript_type = _find_best_transcript_for_video(transcript_list, video_id, logger_to_use)
 
-            for lang in preferred_langs:
-                try:
-                    transcript = transcript_list.find_manually_created_transcript([lang])
-                    logger_to_use.debug(f"Found manually created transcript in '{lang}' for video {video_id}.")
-                    return transcript.fetch(), lang, "manual" # Attempt to fetch
-                except NoTranscriptFound:
-                    continue
-            if attempt == 0:
-                 logger_to_use.debug(f"No manually created transcript found in preferred languages for video {video_id}.")
-
-            if attempt == 0:
-                logger_to_use.debug(f"Attempting to find auto-generated transcript in preferred languages: {preferred_langs} for video {video_id}")
-            for lang in preferred_langs:
-                try:
-                    transcript = transcript_list.find_generated_transcript([lang])
-                    logger_to_use.debug(f"Found auto-generated transcript in '{lang}' for video {video_id}.")
-                    return transcript.fetch(), lang, "generated" # Attempt to fetch
-                except NoTranscriptFound:
-                    continue
-            if attempt == 0:
-                logger_to_use.debug(f"No auto-generated transcript found in preferred languages for video {video_id}.")
-
-            available_manual = transcript_list._manually_created_transcripts
-            if available_manual:
-                first_available_manual_lang = list(available_manual.keys())[0]
-                if attempt == 0:
-                    logger_to_use.debug(f"Attempting to find first available manual transcript ('{first_available_manual_lang}') for video {video_id}.")
-                try:
-                    transcript = transcript_list.find_manually_created_transcript([first_available_manual_lang])
-                    logger_to_use.debug(f"Found manually created transcript in '{first_available_manual_lang}' (first available) for video {video_id}.")
-                    return transcript.fetch(), first_available_manual_lang, "manual"
-                except NoTranscriptFound:
-                    logger_to_use.warning(f"Key '{first_available_manual_lang}' existed in available_manual but NoTranscriptFound was raised.", exc_info=True)
-                    pass 
-            if attempt == 0:
-                logger_to_use.debug(f"No manually created transcript found in any language for video {video_id}.")
-
-            available_generated = transcript_list._generated_transcripts
-            if available_generated:
-                first_available_generated_lang = list(available_generated.keys())[0]
-                if attempt == 0:
-                    logger_to_use.debug(f"Attempting to find first available auto-generated transcript ('{first_available_generated_lang}') for video {video_id}.")
-                try:
-                    transcript = transcript_list.find_generated_transcript([first_available_generated_lang])
-                    logger_to_use.debug(f"Found auto-generated transcript in '{first_available_generated_lang}' (first available) for video {video_id}.")
-                    return transcript.fetch(), first_available_generated_lang, "generated"
-                except NoTranscriptFound:
-                     logger_to_use.warning(f"Key '{first_available_generated_lang}' existed in available_generated but NoTranscriptFound was raised.", exc_info=True)
-                     pass
-            if attempt == 0:
-                 logger_to_use.debug(f"No auto-generated transcript found in any language for video {video_id}.")
-            
-            logger_to_use.error(f"No suitable transcript found to fetch for video {video_id} even after listing available.")
-            return None, None, None # No suitable transcript type found to even attempt fetching
+            if transcript:
+                logger_to_use.debug(f"Fetching content for '{lang}' ({transcript_type}) transcript...")
+                return transcript.fetch(), lang, transcript_type
+            else:
+                logger_to_use.error(f"No suitable transcript found to fetch for video {video_id}.")
+                return None, None, None
 
         except TranscriptsDisabled:
             logger_to_use.error(f"Transcripts are disabled for video {video_id}.", exc_info=True)
             return None, None, None # No point in retrying if disabled
-        except (ET.ParseError, CouldNotRetrieveTranscript) as e: # Catch specific errors for retry
+        except (ET.ParseError, CouldNotRetrieveTranscript) as e:
             last_exception = e
             logger_to_use.warning(f"Attempt {attempt + 1} to fetch transcript for {video_id} failed: {e}")
             if attempt < max_retries:
                 logger_to_use.info(f"Retrying in {retry_delay_seconds} seconds...")
                 time.sleep(retry_delay_seconds)
-            else:
-                logger_to_use.error(f"All {max_retries + 1} attempts to fetch transcript for {video_id} failed.")
-        except Exception as e: # Catch other unexpected errors from list_transcripts or other parts
-            logger_to_use.error(f"An unexpected error occurred while trying to list/find transcript for {video_id} on attempt {attempt + 1}: {e}", exc_info=True)
-            last_exception = e # Store it
-            if attempt < max_retries: # Also retry on generic errors during listing, could be temp network
-                 logger_to_use.info(f"Retrying generic error in {retry_delay_seconds} seconds...")
+        except Exception as e:
+            last_exception = e
+            logger_to_use.error(f"An unexpected error occurred on attempt {attempt + 1} for {video_id}: {e}", exc_info=True)
+            if attempt < max_retries:
+                 logger_to_use.info(f"Retrying in {retry_delay_seconds} seconds...")
                  time.sleep(retry_delay_seconds)
-            else:
-                logger_to_use.error(f"All {max_retries + 1} attempts failed due to unexpected errors for {video_id}.")
 
-    logger_to_use.error(f"Failed to fetch transcript for {video_id} after all retries. Last error: {last_exception}", exc_info=True if last_exception else False)
+    logger_to_use.error(f"All {max_retries + 1} attempts to fetch transcript for {video_id} failed. Last error: {last_exception}", exc_info=True if last_exception else False)
     return None, None, None
 
 def get_youtube_video_title(video_url_or_id, logger=None):
@@ -138,17 +135,6 @@ def get_youtube_video_title(video_url_or_id, logger=None):
         elif "youtu.be/" in video_url_or_id:
             video_id_fallback = video_url_or_id.split("youtu.be/")[1].split("?")[0]
         return video_id_fallback
-
-def get_video_id(url_or_id):
-    """
-    Extracts the video ID from a YouTube URL or returns the ID if it's already an ID.
-    """
-    if "youtube.com/watch?v=" in url_or_id:
-        return url_or_id.split("watch?v=")[1].split("&")[0]
-    elif "youtu.be/" in url_or_id:
-        return url_or_id.split("youtu.be/")[1].split("?")[0]
-    # Assume it's already an ID if no URL format matches
-    return url_or_id
 
 def fetch_and_prepare_transcript(video_id, logger=None):
     """

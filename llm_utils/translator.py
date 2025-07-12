@@ -169,7 +169,7 @@ async def execute_translation_async(
             task_type = "unknown"
             if "json_subtitle_batch" in first_task_id:
                 task_type = "json_subtitle_batch"
-            elif "json_batch" in first_task_id:
+            elif first_task_id.startswith("batch::"): # 修正：书籍的批量任务ID以'batch::'开头
                 task_type = "json_batch"
             elif "html_part" in first_task_id:
                 task_type = "html_part"

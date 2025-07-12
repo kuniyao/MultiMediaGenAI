@@ -40,9 +40,7 @@ class BookBuildProcessor(BaseProcessor):
                     tasks_to_translate=new_context.repair_tasks,
                     source_lang_code=new_context.source_lang or "en",
                     target_lang=new_context.target_lang,
-                    logger=self.logger,
-                    concurrency=new_context.concurrency,
-                    glossary=new_context.glossary
+                    logger=self.logger
                 )
                 
                 new_context.llm_logs.extend(repair_llm_logs)

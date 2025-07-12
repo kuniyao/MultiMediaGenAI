@@ -39,9 +39,7 @@ class BookTranslationProcessor(BaseProcessor):
                 tasks_to_translate=tasks,
                 source_lang_code=source_lang,
                 target_lang=target_lang,
-                logger=self.logger,
-                concurrency=concurrency,
-                glossary=glossary
+                logger=self.logger
             )
 
             if not translated_results:
