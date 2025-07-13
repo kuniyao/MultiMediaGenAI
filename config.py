@@ -67,3 +67,16 @@ LANGUAGE_EXPANSION_FACTOR = 3
 
 # Logging Configuration
 LOGS_DIR = "logs"
+
+# === New Configurations for Text Chunking in Processors ===
+# The target size (in characters) for each text chunk when splitting long documents.
+# This is applied before sending the text to the LLM.
+# For Gemini 1.5 Flash (1M context window), a larger chunk size is efficient.
+# We set it to 32k characters, which is a safe and performant value that balances
+# API call efficiency and the model's output token limits.
+TRANSLATION_CHUNK_SIZE = 32768
+
+# The number of characters to overlap between consecutive chunks.
+# This helps maintain context and ensures smooth transitions at chunk boundaries.
+# A good starting point is 5-10% of the chunk size.
+TRANSLATION_CHUNK_OVERLAP = 3000

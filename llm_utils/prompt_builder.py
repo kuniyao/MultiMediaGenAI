@@ -273,22 +273,33 @@ Now, please process the following JSON data according to all the rules above. Tr
 
 def build_text_file_translation_prompt(text_content: str, source_lang: str, target_lang: str) -> str:
     """
-    A simple prompt for translating a block of plain text.
+    一個經過強化的、用於翻譯帶有HTML標籤的文本塊的Prompt。
     """
     prompt = f"""
 # ROLE & GOAL
-You are an expert translator. Your task is to translate the following text from {source_lang} to {target_lang}.
+You are an expert technical translator. Your SOLE task is to translate the text content within an HTML snippet from {source_lang} to {target_lang}, while preserving the HTML structure perfectly.
 
 # CRITICAL RULES
-1.  Translate the entire text provided by the user.
-2.  Do not add any extra commentary, greetings, or explanations.
-3.  Your output should only be the translated text.
+1.  **HTML TAG PRESERVATION**: This is your most important instruction. You MUST preserve all HTML tags (e.g., `<h1>`, `<p>`, `<p class="indent">`, `<b>`, `<i>`, `<a href="...">`) and their attributes EXACTLY as they appear in the source text. DO NOT alter, add, or remove any tags or attributes.
+2.  **TRANSLATE TEXT ONLY**: Only translate the human-readable text content that is between the HTML tags.
+3.  **NO PLAIN TEXT**: Your output MUST be a valid HTML snippet. It MUST NOT be plain text.
+4.  **NO EXTRA COMMENTARY**: Do not add any explanations, greetings, or apologies in your response. Your output should only be the translated HTML snippet.
+
+# EXAMPLE
+-   **INPUT TEXT**:
+    ```html
+    <h1 class="title">Chapter 1</h1><p class="indent">This is the <b>first</b> paragraph.</p>
+    ```
+-   **EXPECTED OUTPUT (for target_lang 'zh-CN')**:
+    ```html
+    <h1 class="title">第一章</h1><p class="indent">这是<b>第一</b>段。</p>
+    ```
 
 # TASK
-Translate the following text from {source_lang} to {target_lang}:
+Now, translate the following HTML snippet from {source_lang} to {target_lang}. Follow all the rules above.
 
---- START OF TEXT ---
+--- START OF HTML SNIPPET ---
 {text_content}
---- END OF TEXT ---
+--- END OF HTML SNIPPET ---
 """
     return prompt.strip()

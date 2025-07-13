@@ -1,68 +1,104 @@
+# processors/book/book_build_processor.py
+
 import logging
 from copy import deepcopy
+from typing import Dict, List
 from genai_processors import processor
 from workflows.book.parts import TranslatedChapterPart, TranslatedBookPart, EpubBookPart
-from format_converters.book_schema import Book
+from format_converters.book_schema import Book, Chapter, HeadingBlock
 
 class BookBuildProcessor(processor.Processor):
     """
-    一個接收 TranslatedChapterPart 流，將它們重新組裝成一本完整的書，
+    一個接收多個 TranslatedChapterPart 和一個 EpubBookPart，
+    將它們智能地重組、拼接成一本完整的書，
     並在流結束時輸出一個 TranslatedBookPart 的處理器。
     """
     def __init__(self):
         self.logger = logging.getLogger(__name__)
-        self._original_book_structure: Book | None = None
 
     async def call(self, stream):
         """
-        處理傳入的數據流，收集所有已翻譯的章節。
+        處理傳入的數據流，收集所有數據，並在流結束時執行組裝。
         """
-        translated_chapters_map = {}
+        original_book: Book | None = None
+        unzip_dir: str = ""
         
+        # 用於存儲從批處理任務中直接獲得的、完整的翻譯章節
+        complete_translated_chapters: Dict[str, Chapter] = {}
+        # 用於收集一個長章節被切分後的所有翻譯部分
+        split_chapter_parts: Dict[str, List[TranslatedChapterPart]] = {}
+
         async for part in stream:
-            # 捕獲原始的 EpubBookPart 以獲取書籍結構
             if isinstance(part, EpubBookPart):
-                self.logger.info("BookBuildProcessor captured the original book structure.")
-                # 我們需要一個深拷貝，因為我們將修改其內容
-                self._original_book_structure = deepcopy(part.book)
+                self.logger.info("BookBuildProcessor: Captured the original book structure.")
+                original_book = deepcopy(part.book)
+                unzip_dir = part.unzip_dir
                 continue
 
             if not isinstance(part, TranslatedChapterPart):
                 self.logger.warning(f"BookBuildProcessor received an unexpected part type: {type(part)}")
                 continue
             
-            # 按章節 ID 存儲已翻譯的章節對象
-            chapter = part.translated_chapter
-            translated_chapters_map[chapter.id] = chapter
-            self.logger.info(f"Collected translated chapter: {chapter.id}")
+            # 根據元數據判斷這個Part是來自批處理還是切分
+            source_metadata = part.metadata
+            chapter_id = part.translated_chapter.id
+            
+            # 如果 part_number 存在，說明它是一個被切分的塊
+            if "part_number" in source_metadata:
+                if chapter_id not in split_chapter_parts:
+                    split_chapter_parts[chapter_id] = []
+                split_chapter_parts[chapter_id].append(part)
+            # 否則，它是一個來自批處理的、完整的章節
+            else:
+                complete_translated_chapters[chapter_id] = part.translated_chapter
 
-        # 當流結束時，如果我們有原始書籍結構和已翻譯的章節，就開始構建
-        if self._original_book_structure and translated_chapters_map:
-            self.logger.info("All translated chapters received. Building final book object...")
-            
-            final_book = self._original_book_structure
-            
-            # 用翻譯後的章節替換原始書籍結構中的章節
-            final_chapters = []
-            for original_chapter in final_book.chapters:
-                if original_chapter.id in translated_chapters_map:
-                    final_chapters.append(translated_chapters_map[original_chapter.id])
-                else:
-                    # 如果某個章節由於某種原因沒有被翻譯，保留原始章節
-                    self.logger.warning(f"Chapter '{original_chapter.id}' was not found in translated parts. Keeping original.")
-                    final_chapters.append(original_chapter)
-            
-            final_book.chapters = final_chapters
-            
-            # 更新書籍元數據中的目標語言和標題等
-            # (這部分邏輯可以根據需要擴展)
-            final_book.metadata.language_target = final_book.metadata.language_source # 假設
-            final_book.metadata.title_target = final_book.metadata.title_source + " (Translated)"
+        # --- 流結束，開始組裝 ---
+        if not original_book:
+            self.logger.error("BookBuildProcessor did not receive the original book structure. Cannot build final book.")
+            return
 
-            # 創建並產生包含完整 Book 對象的 Part
-            yield TranslatedBookPart(
-                book=final_book
-            )
-            self.logger.info("Successfully built and yielded TranslatedBookPart.")
-        elif not self._original_book_structure:
-             self.logger.error("BookBuildProcessor did not receive the original book structure (EpubBookPart). Cannot build final book.")
+        self.logger.info("All parts received. Assembling final translated book...")
+        
+        # 1. 重組所有被切分的長章節
+        for chapter_id, parts in split_chapter_parts.items():
+            self.logger.info(f"Re-assembling {len(parts)} split parts for chapter '{chapter_id}'...")
+            # 按 part_number 排序，確保順序正確
+            parts.sort(key=lambda p: p.metadata.get("part_number", 0))
+            
+            full_content = []
+            for p in parts:
+                full_content.extend(p.translated_chapter.content)
+            
+            # 創建一個新的、完整的章節對象
+            reassembled_chapter = Chapter(id=chapter_id, content=full_content)
+            complete_translated_chapters[chapter_id] = reassembled_chapter
+
+        # 2. 用翻譯好的章節內容，更新原始書籍結構
+        for i, original_chapter in enumerate(original_book.chapters):
+            if original_chapter.id in complete_translated_chapters:
+                translated_version = complete_translated_chapters[original_chapter.id]
+                # 將翻譯好的內容和ID，賦值給原始章節的副本
+                original_chapter.content = translated_version.content
+                # 從翻譯好的內容中提取標題
+                found_title = False
+                for block in original_chapter.content:
+                    if isinstance(block, HeadingBlock):
+                        original_chapter.title_target = block.content_source
+                        found_title = True
+                        break
+                if not found_title:
+                    original_chapter.title_target = original_chapter.title
+                
+                self.logger.info(f"Applied translated content for chapter '{original_chapter.id}'.")
+            else:
+                self.logger.warning(f"Chapter '{original_chapter.id}' not found in translated parts. Keeping original.")
+                # 如果沒有翻譯版本，則將原文作爲“翻譯”結果
+                original_chapter.title_target = original_chapter.title
+
+        # 3. 產出最終的、完整的 TranslatedBookPart
+        yield TranslatedBookPart(
+            book=original_book,
+            unzip_dir=unzip_dir,
+            metadata={"title": original_book.metadata.title_source + " (Translated)"}
+        )
+        self.logger.info("Successfully built and yielded the final TranslatedBookPart.")

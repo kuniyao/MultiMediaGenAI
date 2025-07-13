@@ -2,41 +2,32 @@
 
 import logging
 import re
+import json
 from genai_processors import processor
 from workflows.parts import TranslatedTextPart
 from workflows.book.parts import TranslatedChapterPart
 from format_converters.book_schema import Chapter
-from format_converters.html_mapper import html_to_blocks
+from format_converters.html_mapper import html_to_blocks, parse_html_body_content
 
 class HtmlToChapterProcessor(processor.PartProcessor):
     """
     一個將包含已翻譯 HTML 字符串的 TranslatedTextPart 反序列化為
     結構化的 TranslatedChapterPart 的處理器。
+    它現在可以處理來自批處理或單塊翻譯的結果。
     """
     def __init__(self):
         super().__init__()
         self.logger = logging.getLogger(__name__)
 
     def _clean_html_content(self, html_string: str) -> str:
-        """
-        清理 LLM 可能返回的額外文本或 Markdown 標記。
-        """
-        # 移除 Markdown 代码块标记
-        cleaned_string = re.sub(r'^```[a-zA-Z]*\n', '', html_string.strip())
-        cleaned_string = re.sub(r'\n```$', '', cleaned_string)
+        """清理 LLM 可能返回的額外文本或 Markdown 標記。"""
+        # 策略一：使用正則表達式尋找被Markdown包裹的JSON或HTML代碼塊
+        match = re.search(r'```(?:json|html)?\s*([\s\S]*?)\s*```', html_string, re.DOTALL)
+        if match:
+            return match.group(1).strip()
         
-        # 嘗試找到 XML 聲明的起始位置
-        xml_declaration_pos = cleaned_string.find('<?xml')
-        if xml_declaration_pos != -1:
-            return cleaned_string[xml_declaration_pos:]
-
-        # 如果沒有 XML 聲明，嘗試找到 <html> 標籤的起始位置（不區分大小寫）
-        html_tag_match = re.search(r'<html', cleaned_string, re.IGNORECASE)
-        if html_tag_match:
-            return cleaned_string[html_tag_match.start():]
-        
-        self.logger.warning("Could not find '<?xml' or '<html>' tag in the translated content. Assuming it's a clean fragment.")
-        return cleaned_string
+        # 策略二：如果沒有找到代碼塊，則假定它是一個乾淨的片段
+        return html_string.strip()
 
     def match(self, part: processor.ProcessorPart) -> bool:
         """只處理 TranslatedTextPart。"""
@@ -46,36 +37,58 @@ class HtmlToChapterProcessor(processor.PartProcessor):
         """
         處理單個 TranslatedTextPart，將其 HTML 內容轉換回 Chapter 對象。
         """
-        chapter_id = part.metadata.get("original_chapter_id", "unknown_chapter")
-        try:
-            self.logger.info(f"Deserializing HTML for chapter '{chapter_id}'...")
+        source_metadata = part.metadata
+        task_type = source_metadata.get("type")
+
+        # 情況一：處理來自批處理任務的結果
+        if task_type == "json_batch":
+            self.logger.info("Processing a batch translation result...")
+            try:
+                cleaned_json_str = self._clean_html_content(part.translated_text)
+                translated_chapters_data = json.loads(cleaned_json_str)
+                
+                for chapter_data in translated_chapters_data:
+                    chapter_id = chapter_data.get("id")
+                    html_content = chapter_data.get("html_content", "")
+                    if not chapter_id:
+                        self.logger.warning("Found a chapter in batch without an 'id'. Skipping.")
+                        continue
+                    
+                    blocks = html_to_blocks(html_content, source_metadata.get("image_resources", {}), self.logger)
+                    
+                    # 【關鍵修復】: 為每個從批處理中解析出的章節，創建一個新的、獨立的Part
+                    new_metadata = source_metadata.copy()
+                    new_metadata["type"] = "batch_item" # 標記它的來源
+                    new_metadata["original_chapter_id"] = chapter_id # 注入ID
+
+                    yield TranslatedChapterPart(
+                        translated_chapter=Chapter(id=chapter_id, content=blocks),
+                        metadata=new_metadata
+                    )
+                self.logger.info(f"Successfully deserialized {len(translated_chapters_data)} chapters from batch.")
+
+            except json.JSONDecodeError:
+                self.logger.error(f"Failed to decode JSON from batch result. Raw text: {part.translated_text}", exc_info=True)
+        
+        # 情況二：處理來自單個（可能是切分的）章節塊的結果
+        elif task_type == "text_file":
+            original_chapter_id = source_metadata.get("original_chapter_id")
+            if not original_chapter_id:
+                self.logger.error(f"Received a single part task without 'original_chapter_id' in metadata. Skipping. Metadata: {source_metadata}")
+                return
+
+            self.logger.info(f"Processing a single/split chapter result for '{original_chapter_id}'...")
             
-            # 1. 清理 LLM 返回的 HTML 字符串
             cleaned_html = self._clean_html_content(part.translated_text)
+            if cleaned_html and not cleaned_html.strip().startswith('<'):
+                self.logger.warning(f"Content for '{original_chapter_id}' appears to be plain text. Wrapping in <p> tags.")
+                cleaned_html = f"<p>{cleaned_html.strip()}</p>"
 
-            # 2. 調用工具函數將 HTML 解析回 Block 列表
-            # 【修復】從元數據中獲取 image_resources，以正確解析圖片路徑
-            image_resources = part.metadata.get("image_resources", {})
-            translated_blocks = html_to_blocks(cleaned_html, image_resources=image_resources, logger=self.logger)
-
-            # 3. 根據原始元數據和翻譯後的 Block 重建 Chapter 對象
-            translated_chapter = Chapter(
-                id=chapter_id,
-                title=part.metadata.get("original_chapter_title"), # title 可以是 None
-                epub_type=part.metadata.get("original_chapter_epub_type"),
-                internal_css=part.metadata.get("original_chapter_internal_css"),
-                content=translated_blocks,
-                # 【修復】確保 title_target 總是一個字符串，以滿足 Pydantic 驗證
-                title_target=part.metadata.get("original_chapter_title") or ""
-            )
-
-            # 4. 產出包含新 Chapter 對象的 Part
+            blocks = html_to_blocks(cleaned_html, source_metadata.get("image_resources", {}), self.logger)
+            
             yield TranslatedChapterPart(
-                translated_chapter=translated_chapter,
-                metadata=part.metadata
+                translated_chapter=Chapter(id=original_chapter_id, content=blocks),
+                metadata=source_metadata
             )
-            self.logger.info(f"Successfully deserialized chapter '{chapter_id}'.")
-
-        except Exception as e:
-            self.logger.error(f"Error deserializing chapter {chapter_id}: {e}", exc_info=True)
-            yield part
+        else:
+            self.logger.warning(f"HtmlToChapterProcessor received a TranslatedTextPart with an unknown task type: '{task_type}'. Skipping.")

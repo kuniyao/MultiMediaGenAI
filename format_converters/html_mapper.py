@@ -513,6 +513,44 @@ def parse_pseudo_list_block(tags: List[Tag]) -> ListBlock:
         css_classes=css_classes
     )
 
+def parse_html_body_content(
+    body_content: Tag,
+    chapter_base_dir: pathlib.Path,
+    content_dir: pathlib.Path,
+    image_resources: Dict[str, ImageResource]
+) -> List[AnyBlock]:
+    """
+    【新增】一个可复用的函数，用于解析HTML <body> 内容，
+    能够正确处理 <div> 和 <section> 等容器标签。
+    """
+    blocks: List[AnyBlock] = []
+    if not body_content:
+        return blocks
+
+    tags_to_process = list(body_content.children)
+    current_tag_index = 0
+
+    while current_tag_index < len(tags_to_process):
+        tag = tags_to_process[current_tag_index]
+        current_tag_index += 1
+
+        if not isinstance(tag, Tag):
+            continue
+
+        if tag.name in ['section', 'div']:
+            # 解包容器标签，将其子元素放入待处理列表
+            tags_to_process[current_tag_index:current_tag_index] = list(tag.children)
+            continue
+
+        block = map_tag_to_block(tag, chapter_base_dir, content_dir, image_resources)
+        if block:
+            if isinstance(block, list):
+                blocks.extend(block)
+            else:
+                blocks.append(block)
+    return blocks
+
+
 def html_to_blocks(html_content: str, image_resources: dict, logger) -> list[AnyBlock]:
     """
     【核心】反序列化器：将HTML字符串解析回Block对象列表。
@@ -524,19 +562,10 @@ def html_to_blocks(html_content: str, image_resources: dict, logger) -> list[Any
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
-        content_to_parse = soup.body if soup.body else soup
-        
-        blocks = []
-        for tag in content_to_parse.children:
-            if isinstance(tag, Tag):
-                # 调用本文件中已有的`map_tag_to_block`辅助函数并修正参数
-                result = map_tag_to_block(tag, pathlib.Path('.'), pathlib.Path('.'), image_resources)
-                if result:
-                    if isinstance(result, list):
-                        blocks.extend(result)
-                    else:
-                        blocks.append(result)
-        return blocks
+        # 【修改】使用新的可复用函数来处理
+        body = soup.body if soup.body else soup
+        return parse_html_body_content(body, pathlib.Path('.'), pathlib.Path('.'), image_resources)
+
     except Exception as e:
         logger.error(f"反序列化HTML时发生未知错误: {e}", exc_info=True)
         return []

@@ -22,16 +22,20 @@ class ChapterExtractionProcessor(processor.Processor):
                 continue
 
             book_title = part.book.metadata.title_source
-            self.logger.info(f"Extracting chapters from book: {book_title}")
+            self.logger.info(f"Extracting chapters from book: '{book_title}'")
             
             chapters_to_process = part.book.chapters
+            total_chapters = len(chapters_to_process)
+            self.logger.info(f"Found {total_chapters} chapters in total.")
+
             if self.max_chapters and self.max_chapters > 0:
                 self.logger.info(f"Limiting to the first {self.max_chapters} chapters.")
                 chapters_to_process = chapters_to_process[:self.max_chapters]
 
             # 為每個 Chapter 對象，直接產出一個 ChapterPart
-            for chapter_object in chapters_to_process:
+            for i, chapter_object in enumerate(chapters_to_process):
                 try:
+                    self.logger.info(f"  [{(i+1):02d}/{total_chapters}] Yielding ChapterPart for chapter: {chapter_object.id}")
                     # 將原始 part 的元數據與書籍元數據結合，傳遞給每個章節
                     combined_metadata = {
                         "book_title": book_title,
@@ -47,4 +51,8 @@ class ChapterExtractionProcessor(processor.Processor):
                 except Exception as e:
                     self.logger.error(f"Error creating ChapterPart for chapter '{chapter_object.id}': {e}", exc_info=True)
 
-            self.logger.info(f"Successfully yielded {len(chapters_to_process)} chapters.")
+            self.logger.info(f"Finished yielding {len(chapters_to_process)} chapters.")
+
+            # 【修復】在所有章節都產出後，將原始的 EpubBookPart 也傳遞下去
+            # 這樣，後續的處理器（如 BookBuildProcessor）才能接收到它
+            yield part

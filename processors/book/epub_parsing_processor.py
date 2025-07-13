@@ -2,13 +2,13 @@ import logging
 from genai_processors import processor
 from workflows.parts import TranslationRequestPart
 from workflows.book.parts import EpubBookPart
-# 導入項目自有的 epub 解析器
-from format_converters.epub_parser import epub_to_book
+# 【變更】: 從導入 epub_to_book 改為導入 EpubParser
+from format_converters.epub_parser import EpubParser
 
 class EpubParsingProcessor(processor.Processor):
     """
     一個接收 TranslationRequestPart，調用項目自有的解析器來處理 EPUB 文件，
-    並輸出一個包含結構化 Book 對象的 EpubBookPart 的處理器。
+    並輸出一個包含結構化 Book 對象和臨時目錄路徑的 EpubBookPart 的處理器。
     """
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -27,15 +27,17 @@ class EpubParsingProcessor(processor.Processor):
             self.logger.info(f"Starting EPUB parsing for: {epub_path}")
 
             try:
-                # 使用項目中已有的、更強大的解析器
-                book_object = epub_to_book(epub_path, self.logger)
+                # 【變更】: 直接實例化和使用 EpubParser
+                parser = EpubParser(epub_path, self.logger)
+                book_object = parser.to_book()
                 
                 self.logger.info(f"Successfully parsed EPUB. Title: '{book_object.metadata.title_source}'.")
 
-                # 產生包含完整 Book 對象的 Part
+                # 【變更】: 產生包含 Book 對象和 unzip_dir 路徑的 Part
                 yield EpubBookPart(
                     book=book_object,
-                    metadata=part.metadata # 傳遞原始的元數據
+                    unzip_dir=str(parser.unzip_dir), # 傳遞臨時目錄路徑
+                    metadata=part.metadata
                 )
 
             except Exception as e:

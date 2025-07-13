@@ -46,10 +46,18 @@ class ChapterToHtmlProcessor(processor.PartProcessor):
         處理單個 ChapterPart，將其內容轉換為 HTML 字符串。
         """
         try:
-            self.logger.info(f"Serializing chapter '{part.chapter.id}' to HTML...")
+            chapter_id = part.chapter.id
+            self.logger.info(f"Serializing chapter '{chapter_id}' to HTML...")
             
             # 調用輔助函數將 Chapter 對象的 content 轉換為 HTML
             html_string = self._chapter_content_to_html(part.chapter)
+            html_len = len(html_string)
+            
+            # 關鍵日誌：如果 HTML 為空，我們需要一個明確的警告
+            if html_len == 0:
+                self.logger.warning(f"Chapter '{chapter_id}' serialized to an EMPTY HTML string. It will be skipped by the translator.")
+            else:
+                self.logger.info(f"Successfully serialized chapter '{chapter_id}'. HTML length: {html_len}")
 
             # 創建一個新的 TranslationRequestPart
             yield TranslationRequestPart(
@@ -58,14 +66,13 @@ class ChapterToHtmlProcessor(processor.PartProcessor):
                 target_lang=part.metadata.get("target_lang", "en"),
                 metadata={
                     # 傳遞所有必要的元數據，以便後續可以重建 Chapter
-                    "original_chapter_id": part.chapter.id,
+                    "original_chapter_id": chapter_id,
                     "original_chapter_title": part.chapter.title,
                     "original_chapter_epub_type": part.chapter.epub_type,
                     "original_chapter_internal_css": part.chapter.internal_css,
                     **part.metadata
                 }
             )
-            self.logger.info(f"Successfully serialized chapter '{part.chapter.id}'.")
 
         except Exception as e:
             self.logger.error(f"Error serializing chapter {part.chapter.id}: {e}", exc_info=True)

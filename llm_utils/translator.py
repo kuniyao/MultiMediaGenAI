@@ -5,20 +5,21 @@ import asyncio
 from typing import Optional
 
 from genai_processors import processor
-from workflows.parts import ApiRequestPart, TranslatedTextPart, TranslationRequestPart
+from workflows.book.parts import BatchTranslationTaskPart, SplitChapterTaskPart
+from workflows.parts import TranslatedTextPart
 from .gemini_client import GeminiClient
 from .base_client import BaseLLMClient
-
+from .prompt_builder import PromptBuilder
 
 class TranslatorProcessor(processor.PartProcessor):
     """
-    一個接收 API 請求、調用 LLM 進行翻譯，並輸出翻譯結果的處理器。
+    一個多功能翻譯器，它接收不同類型的翻譯任務Part，
+    為其構建合適的提示，調用LLM進行翻譯，並輸出翻譯結果。
     """
 
     def __init__(self, client: Optional[BaseLLMClient] = None, concurrency_limit: int = 5):
         super().__init__()
         self.logger = logging.getLogger(__name__)
-        # 如果沒有提供客戶端，則創建一個默認的 Gemini 客戶端
         self.client = client or GeminiClient(logger=self.logger)
         self.semaphore = asyncio.Semaphore(concurrency_limit)
         self._is_initialized = False
@@ -34,71 +35,72 @@ class TranslatorProcessor(processor.PartProcessor):
             self.logger.info(f"{self.client.__class__.__name__} 初始化成功。")
         except Exception as e:
             self.logger.critical(f"初始化 LLM 客戶端失敗: {e}", exc_info=True)
-            # 重新引發異常，以便工作流可以捕獲它
             raise
 
     def match(self, part: processor.ProcessorPart) -> bool:
-        """只處理 ApiRequestPart。"""
-        return isinstance(part, ApiRequestPart)
+        """【變更】: 現在可以處理多種翻譯任務 Part。"""
+        return isinstance(part, (BatchTranslationTaskPart, SplitChapterTaskPart))
 
-    async def call(self, part: ApiRequestPart):
-        """處理單個 ApiRequestPart。"""
-        # 確保客戶端已初始化
+    async def call(self, part: processor.ProcessorPart):
+        """
+        處理單個任務 Part，根據其類型��擇不同的處理邏輯。
+        """
         if not self._is_initialized:
             await self.initialize()
 
-        async with self.semaphore:
-            task_id = part.metadata.get("llm_processing_id", "N/A")
-            self.logger.info(f"正在處理任務 (ID: {task_id})...")
+        task_type = ""
+        text_to_translate = ""
+        
+        # 1. 根據 Part 類型準備不同的參數
+        if isinstance(part, BatchTranslationTaskPart):
+            task_type = 'json_batch'
+            text_to_translate = part.json_string
+            self.logger.info(f"接收到批處理任務，包含 {part.chapter_count} 個章節。")
+        elif isinstance(part, SplitChapterTaskPart):
+            task_type = 'text_file' # 對於單個HTML塊，我們使用通用的文本文件提示
+            text_to_translate = part.html_content
+            self.logger.info(f"接收到長章節切分任務: part #{part.part_number} for chapter '{part.original_chapter_id}'.")
 
-            try:
-                # 調用 LLM API
+        if not text_to_translate.strip():
+            self.logger.warning(f"任務 {part.metadata.get('llm_processing_id')} 的輸入文本為空，跳過翻譯。")
+            yield TranslatedTextPart(translated_text="", source_text="", metadata=part.metadata)
+            return
+
+        # 2. 構建提示
+        prompt_builder = PromptBuilder(
+            source_lang=part.metadata.get("source_lang", "en"),
+            target_lang=part.metadata.get("target_lang", "zh-CN")
+        )
+        messages = prompt_builder.build_messages(
+            task_type=task_type,
+            task_string=text_to_translate
+        )
+
+        # 3. 調用 API
+        translated_text = "[TRANSLATION_FAILED]: Unknown error"
+        try:
+            async with self.semaphore:
                 response_text, _ = await self.client.call_api_async(
-                    messages=part.messages,
-                    task_id=task_id
+                    messages=messages,
+                    task_id=str(part.metadata.get("llm_processing_id", "N/A"))
                 )
-                
-                # 提取原始文本，如果它存在於元數據中
-                source_text = part.metadata.get("source_text", "")
+                translated_text = response_text
+        except Exception as e:
+            self.logger.error(f"任務在 API 調用中遇到異常: {e}", exc_info=True)
+            translated_text = f"[TRANSLATION_FAILED]: {e}"
 
-                # 創建並返回包含結果的 Part
-                yield TranslatedTextPart(
-                    translated_text=response_text,
-                    source_text=source_text, # 傳遞原始文本
-                    metadata=part.metadata
-                )
+        # 4. 產出統一的結果 Part，並【關鍵修復】手動構建完整的元數據
+        output_metadata = part.metadata.copy() # 複製基礎元數據
+        output_metadata['type'] = task_type    # 注入我們自己的類型
 
-            except Exception as e:
-                self.logger.error(f"任務 {task_id} 在 API 調用中遇到異常: {e}", exc_info=True)
-                # 在失敗時，也創建一個 Part，但可能包含錯誤信息
-                yield TranslatedTextPart(
-                    translated_text=f"[TRANSLATION_FAILED]: {e}",
-                    source_text=part.metadata.get("source_text", ""),
-                    metadata=part.metadata
-                )
+        # 如果是切分任務，需要確保關鍵的ID和編號信息被傳遞下去
+        if isinstance(part, SplitChapterTaskPart):
+            output_metadata['original_chapter_id'] = part.original_chapter_id
+            output_metadata['part_number'] = part.part_number
+            output_metadata['injected_heading'] = part.injected_heading
 
-
-class SimpleTranslator(processor.Processor):
-    """
-    一個簡化的翻譯器，直接接收 TranslationRequestPart，
-    內部完成提示構建和翻譯。
-    """
-    def __init__(self, client: Optional[BaseLLMClient] = None):
-        super().__init__()
-        self.logger = logging.getLogger(__name__)
-        self.prompt_builder = PromptBuilderProcessor()
-        self.translator = TranslatorProcessor(client=client)
-
-    async def call(self, stream):
-        # 1. 將 TranslationRequestPart 轉換為 ApiRequestPart
-        # 因為 prompt_builder 現在是 PartProcessor，我們需要用 to_processor()
-        api_request_stream = self.prompt_builder.to_processor()(stream)
-        
-        # 2. 將 ApiRequestPart 傳遞給翻��器
-        # 同樣，translator 現在也是 PartProcessor
-        translated_stream = self.translator.to_processor()(api_request_stream)
-        
-        # 3. 產出結果
-        async for result in translated_stream:
-            yield result
-
+        yield TranslatedTextPart(
+            translated_text=translated_text,
+            source_text=text_to_translate,
+            metadata=output_metadata
+        )

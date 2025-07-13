@@ -12,6 +12,10 @@ from .book_schema import (
 )
 # 【變更 1】: 導入我們剛剛建立的"合約"
 from .base_converter import BaseInputConverter
+# 【變更 2】: 導入新的輔助函數
+from .html_mapper import parse_html_body_content
+# 【變更 2】: 導入新的輔助函數
+from .html_mapper import parse_html_body_content
 
 
 # 【變更 2】: 類別改名並繼承自 BaseInputConverter
@@ -31,8 +35,7 @@ class EpubParser(BaseInputConverter):
             raise FileNotFoundError(f"EPUB 文件未找到: {self.epub_path}")
 
         # 創建一個臨時目錄來存放解壓後的檔案
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.unzip_dir = pathlib.Path(self.temp_dir.name)
+        self.unzip_dir = pathlib.Path(tempfile.mkdtemp())
         self._unzip_epub()
 
         # 定位核心的 .opf 文件路徑
@@ -312,36 +315,15 @@ class EpubParser(BaseInputConverter):
             if not isinstance(body, Tag):
                 continue
 
-            blocks: List[AnyBlock] = []
-            
-            tags_to_process = list(body.children)
-            current_tag_index = 0
-            
-            while current_tag_index < len(tags_to_process):
-                tag = tags_to_process[current_tag_index]
-                current_tag_index += 1
+            # 【修改】: 使用新的、可復用的輔助函數來解析章節內容
+            chapter.content = parse_html_body_content(
+                body_content=body,
+                chapter_base_dir=chapter_path.parent,
+                content_dir=self.content_dir,
+                image_resources=self.book.image_resources
+            )
 
-                if not isinstance(tag, Tag):
-                    continue
-                
-                if tag.name in ['section', 'div']:
-                    tags_to_process[current_tag_index:current_tag_index] = list(tag.children)
-                    continue
-
-                block = html_mapper.map_tag_to_block(tag, chapter_base_dir, self.content_dir, self.book.image_resources)
-                if block:
-                    if isinstance(block, list):
-                        blocks.extend(block)
-                    else:
-                        blocks.append(block)
-
-            chapter.content = blocks
-
-    def __del__(self):
-        """在對象銷毀時清理臨時目錄。"""
-        if hasattr(self, 'temp_dir'):
-            self.temp_dir.cleanup()
-            print(f"已清理臨時目錄: {self.unzip_dir}")
+    
 
 def epub_to_book(epub_path: str, logger) -> Book:
     """

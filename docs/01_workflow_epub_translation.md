@@ -1,162 +1,108 @@
-# 文档: EPUB 翻译工作流
+# 文档: EPUB 翻译工作流 (基于 genai-processors)
 
-本文档详细描述了 `MultiMediaGenAI` 项目中用于翻译 EPUB 电子书的端到端工作流。
+本文档详细描述了 `MultiMediaGenAI` 项目中用于翻译 EPUB 电子书的、基于 `genai-processors` 框架的端到端工作流。
 
 - **执行入口**: `translate.py`
-- **核心架构**: 基于"管道-处理器"模式 (`Pipeline-Processor`)
-- **核心目标**: 输入一个 `.epub` 文件，输出一个内容被完整翻译、同时保持原始结构和样式的新的 `.epub` 文件。
+- **核心架构**: 基于 Google 开源的 `genai-processors` 框架，这是一个专为生成式AI设计的、异步的、流式的模块化工作流引擎。
+- **核心思想**: **高内聚、低耦合、可复用**。我们将整个复杂的翻译流程，拆分成一系列獨立的、可插拔的 **处理器 (Processor)**。每个处理器只负责一项專一的任務（如解析、切分章節、翻譯、構建）。數據則被封裝在標準化的 **數據容器 (Part)** 中，在處理器之間順暢地流動。這種設計使得工作流極其清晰、易於維護和擴展。
 
 ---
 
-## 工作流架构
-
-该工作流基于一个异步的 `Pipeline`（管道）执行器，它按顺序调用一系列专门的 `Processor`（处理器）。每个处理器完成一步特定的任务，并在一个统一的 `PipelineContext`（上下文）对象中接收输入和存入输出。这种设计确保了流程的高度模块化、可测试性和可扩展性。
+## 工作流架构 (Data Flow)
 
 ```mermaid
 graph TD;
     subgraph Input [输入]
-        A[EPUB 文件]
+        A[EPUB 文件路径]
     end
 
-    subgraph Orchestration [统一协调]
-        O1[translate.py]
-        O2[workflows/pipeline.py]
-    end
-
-    subgraph ProcessingPipeline [处理管道: 一系列处理器]
+    subgraph "工作流管道 (translate.py)"
         direction LR
-        P1["<b>1. EpubParsingProcessor</b><br>解析EPUB，创建Book对象"]
-        P2["<b>2. ChapterExtractionProcessor</b><br>从Book对象提取翻译任务"]
-        P3["<b>3. BookTranslationProcessor</b><br>执行核心翻译"]
-        P4["<b>4. ValidationAndRepairProcessor</b><br>验证翻译质量，创建修复任务"]
-        P5["<b>5. BookBuildProcessor</b><br>将翻译结果应用回Book对象"]
-        P6["<b>6. EpubWritingProcessor</b><br>将Book对象打包成新EPUB"]
+        P1["<b>1. EpubParsingProcessor</b><br>解析EPUB文件"]
+        P2["<b>2. ChapterPreparationProcessor</b><br>智能切分 & 打包"]
+        P3["<b>3. TranslatorProcessor</b><br>翻译不同任务"]
+        P4["<b>4. HtmlToChapterProcessor</b><br>将HTML转回章节对象"]
+        P5["<b>5. BookBuildProcessor</b><br>重新组装书籍"]
+        P6["<b>6. EpubWritingProcessor</b><br>打包生成新EPUB文件"]
+        P7["<b>7. TempDirCleanupProcessor</b><br>清理临时文件"]
     end
 
     subgraph Output [输出]
         G[翻译后的新 EPUB 文件]
     end
 
-    A --> O1;
-    O1 -- "识别.epub文件, 组装EPUB处理器管道" --> O2;
-    O2 -- "按顺序执行处理器, 在PipelineContext中传递数据" --> P1;
-    P1 --> P2 --> P3 --> P4 --> P5 --> P6;
-    P6 --> G;
+    A -- "TranslationRequestPart" --> P1;
+    P1 -- "EpubBookPart" --> P2;
+    P2 -- "多个 BatchTranslationTaskPart / SplitChapterTaskPart" --> P3;
+    P3 -- "多个 TranslatedTextPart" --> P4;
+    P4 -- "多个 TranslatedChapterPart" --> P5;
+    P5 -- "TranslatedBookPart" --> P6;
+    P6 -- "TranslatedBookPart" --> P7;
+    P7 -- "文件写入磁盘" --> G;
+
 ```
 
 ---
 
-## 数据流转与核心数据结构
-
-EPUB 翻译工作流的核心数据载体是 `workflows.dto.PipelineContext` 对象。所有数据和状态都在这个上下文中，由不同的处理器进行创建、转换和更新。
-
--   **初始化**: `translate.py` 脚本接收命令行参数，并创建一个 `PipelineContext` 实例，填入初始信息如 `source_input` (文件路径), `target_lang` 等。
--   **解析 (`EpubParsingProcessor`)**: 此处理器从上下文中读取 `source_input`，解析EPUB文件，然后将生成的 `Book` 对象（一个包含了 `mmg_id` 的核心数据结构）存回上下文的 `original_book` 字段。
--   **翻译任务提取 (`ChapterExtractionProcessor`)**: 此处理器从上下文的 `original_book` 中提取所有需要翻译的文本片段，并将格式化后的"翻译任务"列表存入上下文的 `translation_tasks` 字段。
--   **第一轮翻译 (`BookTranslationProcessor`)**: 此处理器读取 `translation_tasks`，调用LLM进行翻译，并将初步的翻译结果存入 `translated_results` 字段。
--   **验证与修复 (`ValidationAndRepairProcessor`)**: 这是提升翻译质量的关键步骤。此处理器会对比 `original_book` 和 `translated_results`。它通过 `mmg_id` 识别出可能被"漏翻"的内容块，并将它们打包成一个新的"修复任务"列表，存入 `repair_tasks` 字段。
--   **第二轮翻译 (`BookTranslationProcessor` - 内部逻辑)**: 如果 `repair_tasks` 不为空，`BookTranslationProcessor` 会再次被隐式调用（或其内部有循环逻辑）来处理修复任务，并将修复结果追加到 `translated_results`。
--   **结果应用 (`BookBuildProcessor`)**: 此处理器接收 `original_book` 和完整的 `translated_results`。它将所有翻译结果（无论是初翻还是修复的）精确地应用回 `Book` 对象的深拷贝中，并将这个最终的 `Book` 对象存入 `translated_book` 字段。
--   **输出 (`EpubWritingProcessor`)**: 此处理器读取 `translated_book`，并将其重新打包成一个新的EPUB文件，写入到 `output_dir` 指定的位置。
-
----
-
-## 模块化处理器详解
+## 处理器与数据流详解
 
 ### 1. `EpubParsingProcessor`
 
-- **核心职责**: 解析原始EPUB文件，构建 `Book` 对象。
-- **输入 (来自 `PipelineContext`)**: `source_input` (EPUB文件路径)。
-- **输出 (写入 `PipelineContext`)**: `original_book` (`Book` 对象)。
+-   **核心职责**: 将输入的EPUB文件路径，转换为一个包含完整书籍结构的对象。
+-   **输入**: `TranslationRequestPart` (包含 `text_to_translate` 字段，���值为EPUB文件路径)。
+-   **输出**: `EpubBookPart` (包含一个结构化的 `Book` 对象和解压EPUB文件后产生的临时目录路径 `unzip_dir`)。
+-   **涉及文件**: `processors/book/epub_parsing_processor.py`
 
-**任务与逻辑**:
-1.  该处理器是管道的起点，负责将文件系统中的 `.epub` 文件转换为内存中的标准化数据结构。
-2.  它会解压 EPUB 文件，深度解析其包文件 (`.opf`)、导航文件 (`nav.xhtml`) 以及所有内容文档 (XHTML)。
-3.  **核心逻辑**: 在解析HTML内容为内部块结构时，为每一个内容块（如段落、标题、列表项等）分配一个唯一的、稳定的 `mmg_id` 属性。
-4.  最终将所有信息封装到一个 `Book` 对象中，存入上下文，供后续处理器使用。
+### 2. `ChapterPreparationProcessor` (新核心)
 
-**关键内部实现**:
-- `data_sources.epub_source.EpubSource`: 处理器通过实例化此类来启动解析。
-- `EpubSource.get_book()`: 这是获取 `Book` 对象的主方法。
-- `format_converters.epub_parser.EpubParser`: 在 `get_book()` 内部被调用，执行最核心、最复杂的EPUB文件解析和 `mmg_id` 分配工作。
+-   **核心职责**: 智能地將一本完整的書，預處理成一系列優化過的、用於翻譯的任務。這是融合了舊工作流“智慧”的核心。
+-   **输入**: `EpubBookPart`。
+-   **输出**: 根據策略，產出兩種不同類型的任務 `Part`:
+    -   `BatchTranslationTaskPart`: 用於將多個較短的章節打包成一個批處理任務。
+    -   `SplitChapterTaskPart`: 用於將一個過長的章節，按內容塊（Block）切分成多個部分。
+    -   最後，它還會將原始的 `EpubBookPart` 再次傳遞下去，供 `BookBuildProcessor` 使用。
+-   **涉及文件**: `processors/book/chapter_preparation_processor.py`
 
-### 2. `ChapterExtractionProcessor`
+### 3. `TranslatorProcessor`
 
-- **核心职责**: 从 `Book` 对象中提取所有可翻译内容，并准备成LLM任务。
-- **输入 (来自 `PipelineContext`)**: `original_book`。
-- **输出 (写入 `PipelineContext`)**: `translation_tasks` (翻译任务列表)。
+-   **核心职责**: 一個多功能的“翻譯服務中心”，能夠響應不同類型的翻譯任務。
+-   **输入**: `BatchTranslationTaskPart` 或 `SplitChapterTaskPart`。
+-   **输出**: `TranslatedTextPart` (包含已翻譯的HTML或JSON字符串，並攜帶完整的元數據)。
+-   **涉及文件**: `llm_utils/translator.py`
+-   **核心逻辑**:
+    -   ��查傳入 `Part` 的類型。
+    -   如果是 `BatchTranslationTaskPart`，則調用為批處理JSON設計的Prompt。
+    -   如果是 `SplitChapterTaskPart`，則調用為單個HTML塊設計的、經過指令強化的Prompt。
+    -   將上游 `Part` 的元數據完整地複製並傳遞到產出的 `TranslatedTextPart` 中。
 
-**任务与逻辑**:
-1.  接收第一步生成的、已带有 `mmg_id` 的 `Book` 对象。
-2.  遍历所有章节内容，将其序列化为HTML字符串。在此过程中，`mmg_id` 会被转换为HTML标签的 `data-mmg-id` 属性。
-3.  为了提升效率，此处理器会将内容过长的章节拆分为多个部分（`split_part`），或将多个内容较短的小章节打包成一个批处理任务（`json_batch`）。
-4.  最终生成一个"翻译任务"列表，每个任务都包含了附有 `data-mmg-id` 的HTML内容，为后续的精确修复打下基础。
+### 4. `HtmlToChapterProcessor`
 
-**关键内部实现**:
-- `llm_utils.book_processor.extract_translatable_chapters`: 处理器直接调用此核心函数，该函数封装了所有内容提取、智能拆分大章节和打包小章节的复杂逻辑。
+-   **核心职责**: 将翻译好的HTML或JSON字符串，反序列化回結構化的 `Chapter` 对象。
+-   **输入**: `TranslatedTextPart`。
+-   **输出**: `TranslatedChapterPart` (包含一個內容已被翻譯的 `Chapter` 對象)。
+-   **涉及文件**: `processors/book/html_to_chapter_processor.py`
+-   **核心逻辑**:
+    -   檢查傳入 `Part` 的元數據中的 `type` 字段。
+    -   如果是 `'json_batch'`，則解析JSON，並為其中的每一個章節數據，生成一個 `TranslatedChapterPart`。
+    -   如果是 `'text_file'`，則直接處理HTML內容，生成一個 `TranslatedChapterPart`。
 
-### 3. `BookTranslationProcessor`
+### 5. `BookBuildProcessor`
 
-- **核心职责**: 执行核心翻译，并能处理修复任务。
-- **输入 (来自 `PipelineContext`)**: `translation_tasks`, `repair_tasks` (可选)。
-- **输出 (写入 `PipelineContext`)**: `translated_results`。
+-   **核心职责**: 智能的“組裝工廠”，收集所有翻譯好的獨立章節（無論是來自批處理還是切分），並將它們重新組裝成一本完整的書。
+-   **输入**: 多个 `TranslatedChapterPart` 和一个 `EpubBookPart`。
+-   **输出**: `TranslatedBookPart` (包含一個內容已被完全翻譯的 `Book` 對象)。
+-   **涉及文件**: `processors/book/book_build_processor.py`
+-   **核心逻辑**:
+    -   收集所有傳入的 `TranslatedChapterPart`。
+    -   對於被切分的章節，根據 `part_number` 將其內容塊重新拼接起來。
+    -   使用原始的 `EpubBookPart` 作為“模具”，將所有翻譯好的章節內容精確地填充回去。
 
-**任务与逻辑**:
-这是一个可被多次利用的、高度复用的翻译服务。
+### 6. `EpubWritingProcessor` & 7. `TempDirCleanupProcessor`
 
-1.  **第一轮 (Initial Translation)**: 接收 `translation_tasks` 生成的全部任务列表，进行全面的初步翻译。
-2.  **第二轮 (Repair Translation)**: (可选) 如果 `ValidationAndRepairProcessor` 发现了漏翻内容并填充了 `repair_tasks`，此处理器（或其后续逻辑）会被再次调用，仅针对漏翻的内容进行二次翻译。
-3.  **并发与重试**: 内部使用 `asyncio.Semaphore` 管理并发API请求，并内置了指数退避重试机制，以确保调用的稳定性和鲁棒性。
-4.  **Prompt 处理**: 根据任务类型（`json_batch`, `split_part`, `fix_batch`），从 `prompts.json` 加载并构建相应的指令。
+-   **`EpubWritingProcessor`**:
+    -   **核心职责**: 将内存中最终的 `Book` 对象，写回到磁盘上，生成一个新的 `.epub` 文件。
+    -   **涉及文件**: `processors/book/epub_writing_processor.py`
 
-**关键内部实现**:
-- `llm_utils.translator.execute_translation_async`: 处理器调用此异步函数来与LLM API进行交互。该函数负责管理并发、处理重试、构建Prompts，并返回翻译结果。
-
-### 3.5 `ValidationAndRepairProcessor`
-
-- **核心职责**: 在初翻后进行质量校验，并提取需要修复的任务。
-- **输入 (来自 `PipelineContext`)**: `original_book`, `translated_results` (初翻结果)。
-- **输出 (写入 `PipelineContext`)**: `repair_tasks`。
-
-**任务与逻辑**:
-1.  在第一轮翻译后被调用。
-2.  **核心逻辑**: 遍历 `translated_results`，将翻译后的HTML解析回临时的内容块。然后通过 `mmg_id` 在 `original_book` 中找到对应的原始块。
-3.  通过对比翻译后块的纯文本和原始块的纯文本，判断是否存在"漏翻"（即两者文本完全相同）。
-4.  将所有被识别为漏翻的原始块收集起来，打包成一个新的、类型为 `fix_batch` 的翻译任务，并存入 `repair_tasks` 字段。
-5.  如果未发现漏翻，则 `repair_tasks` 保持为空。
-
-**关键内部实现**:
-- `llm_utils.book_processor.validate_and_extract_fixes`: 处理器直接调用此核心函数。该函数通过 `mmg_id` 在原始 `Book` 对象和翻译结果之间进行精确匹配和对比，并负责生成修复任务。
-
-### 4. `BookBuildProcessor`
-
-- **核心职责**: 将所有翻译结果智能地应用回 `Book` 对象。
-- **输入 (来自 `PipelineContext`)**: `original_book`, `translated_results` (合并后的最终结果)。
-- **输出 (写入 `PipelineContext`)**: `translated_book`。
-
-**任务与逻辑**:
-1.  接收原始的 `Book` 对象和**合并后**的翻译结果列表（包含初翻结果和可能的修复结果）。
-2.  创建一个 `Book` 对象的深拷贝，生成 `translated_book`，以确保所有修改都在一个新的对象上进行。
-3.  **智能分发与精确替换**: 遍历所有翻译结果，利用 `mmg_id` 作为关键，在 `translated_book` 中找到需要被更新的旧块，并用翻译后的新块将其精确替换。
-4.  **后处理**: 进行全局的标题提取和目录（ToC）修正，确保目录链接文本与最终翻译的章节标题一致。
-5.  返回一个内容已被完全翻译和修复的 `translated_book` 对象。
-
-**关键内部实现**:
-- **修复翻译**: `llm_utils.translator.execute_translation_async`: 如果检测到 `repair_tasks`，处理器会首先调用此函数完成修复翻译。
-- **结果应用**: `llm_utils.book_processor.apply_translations_to_book`: 处理器调用此核心函数，将初翻和修复后的所有结果合并，并智能地应用回一个新的 `Book` 对象中。
-
-### 5. `EpubWritingProcessor`
-
-- **核心职责**: 将内存中的 `Book` 对象写回为 `.epub` 文件。
-- **输入 (来自 `PipelineContext`)**: `translated_book`, `output_dir`。
-- **输出**: 在文件系统生成最终的 `.epub` 文件。
-
-**任务与逻辑**:
-1.  接收最终翻译和修复完成的 `translated_book` 对象。
-2.  **核心职责**: 将内容块列表转换回HTML字符串。在此过程中，`data-mmg-id` 属性也会被写回到最终的XHTML文件中，便于调试。
-3.  在临时目录中重建EPUB的文件结构，写入所有翻译后的XHTML章节、新的元数据文件 (`.opf`)、新的导航文件 (`nav.xhtml`)以及所有资源（图片、CSS）。
-4.  最后，将所有文件打包压缩，生成最终的、可供阅读的 `.epub` 文件。
-
-**关键内部实现**:
-- `common_utils.output_manager.OutputManager`: 用于创建和管理工作流的输出目录。
-- `format_converters.epub_writer.book_to_epub`: 处理器调用此核心函数，该函数负责将 `Book` 对象序列化为EPUB文件结构，并最终打包成 `.epub` 文件。
+-   **`TempDirCleanupProcessor`**:
+    -   **核心职责**: 工作流的“清道夫”，负责清理第一步解压EPUB时创建的临时文件夹。
+    -   **涉及文件**: `processors/book/temp_dir_cleanup_processor.py`
