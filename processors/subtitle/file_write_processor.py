@@ -1,69 +1,47 @@
-# processors/subtitle/file_write_processor.py
-
 import logging
 from pathlib import Path
-import json
+from typing import AsyncGenerator
 
-from genai_processors import processor
+from genai_processors.processor import Processor
+from genai_processors.content_api import ProcessorPart
 from workflows.parts import TranslatedTextPart
 from common_utils.output_manager import OutputManager
-from common_utils.file_helpers import sanitize_filename
 
-
-class FileWriterProcessor(processor.Processor):
+class FileWriterProcessor(Processor):
     """
-    一個接收包含翻譯文本和元數據的 Part，並將內容寫入目標文件的處理器。
+    A processor that writes the content of a Part to a file.
+    It handles TranslatedTextPart for generic text.
     """
-
-    def __init__(self, output_dir: str | Path):
+    def __init__(self, output_dir: str):
         super().__init__()
-        self.output_dir = Path(output_dir)
-        self.logger = logging.getLogger(__name__)
+        self.logger = logging.getLogger(self.__class__.__name__)
+        self.output_manager = OutputManager(output_dir, self.logger)
 
-    async def call(self, stream):
-        """
-        處理傳入的數據流，並根據 Part 中的信息寫入文件。
-        """
+    def _get_output_path(self, part: ProcessorPart) -> Path:
+        """Determines the output file path based on the part's metadata."""
+        original_file = part.metadata.get("original_file", "translated_output.txt")
+        target_lang = part.metadata.get("target_lang", "translated")
+        p = Path(original_file)
+        filename = f"{p.stem}_{target_lang}{p.suffix}"
+        return self.output_manager.get_workflow_output_path("documents", filename)
+
+    async def _process(self, part: ProcessorPart) -> AsyncGenerator[ProcessorPart, None]:
+        if not isinstance(part, TranslatedTextPart):
+            # If it's not a part we know how to write, just pass it through
+            yield part
+            return
+
+        output_content = part.translated_text
+        output_path = self._get_output_path(part)
+
+        self.output_manager.save_file(output_path, output_content)
+        self.logger.info(f"Successfully wrote output to: {output_path}")
+        
+        # Yield the original part so the workflow can continue if needed
+        yield part
+
+    async def call(self, stream) -> AsyncGenerator[ProcessorPart, None]:
+        """The public method to process a stream of parts."""
         async for part in stream:
-            # 我們只關心包含最終翻譯結果的 Part
-            if not isinstance(part, TranslatedTextPart):
-                yield part  # 將不處理的 Part 直接傳遞下去
-                continue
-
-            try:
-                metadata = part.metadata
-                # 從元數據中獲取文件名或標題
-                # 這是為了保持與舊邏輯的兼容性
-                title = metadata.get("title", "untitled")
-                sanitized_title = sanitize_filename(title)
-                
-                # 構造特定於該任務的輸出管理器
-                task_output_dir = self.output_dir / sanitized_title
-                output_manager = OutputManager(str(task_output_dir), self.logger)
-
-                # 確定輸出文件名
-                # 這裡我們假設元數據中會提供原始文件名或一個基礎名
-                original_file_path = Path(metadata.get("original_file", "output.txt"))
-                original_filename = original_file_path.stem
-                target_lang = metadata.get("target_lang", "lang")
-                
-                # 構建最終的文件名，例如 "my_document_fr.txt"
-                output_filename = f"{original_filename}_{target_lang}{original_file_path.suffix}"
-                
-                # 獲取完整的輸出路徑
-                # 這裡我們假設所有翻譯文件都存放在 'translations' 子目錄中
-                output_path = output_manager.get_workflow_output_path(
-                    "translations", 
-                    output_filename
-                )
-
-                # 寫入文件
-                output_manager.save_file(output_path, part.translated_text)
-                self.logger.info(f"成功將翻譯���容寫入到: {output_path}")
-
-                # 將原始的 Part 傳遞下去，表示處理完成
-                yield part
-
-            except Exception as e:
-                self.logger.error(f"寫入文件時出錯 (metadata: {part.metadata}): {e}", exc_info=True)
-                # 發生錯誤時，不傳遞任何 Part
+            async for processed_part in self._process(part):
+                yield processed_part

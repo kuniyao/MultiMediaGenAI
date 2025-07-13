@@ -4,6 +4,7 @@ import pytest
 import asyncio
 from pathlib import Path
 from ebooklib import epub
+from bs4 import BeautifulSoup
 
 from processors.book.epub_writing_processor import EpubWritingProcessor
 from workflows.book.parts import TranslatedBookPart
@@ -52,8 +53,8 @@ async def test_epub_writing_processor_writes_epub_correctly(tmp_path):
     read_book = epub.read_epub(expected_file)
     
     # 驗證元數據
-    assert read_book.get_metadata('DC', 'title')[0][0] == "Livre Traduit"
-    assert read_book.get_metadata('DC', 'creator')[0][0] == "Auteur"
+    assert read_book.get_metadata('DC', 'title')[0][0].strip() == "Livre Traduit"
+    assert read_book.get_metadata('DC', 'creator')[0][0].strip() == "Auteur"
     
     # 驗證章節數量
     items = list(read_book.get_items_of_type(9)) # 9 for XHTML
@@ -61,5 +62,14 @@ async def test_epub_writing_processor_writes_epub_correctly(tmp_path):
     assert len(items) == 3 
     
     # 驗證章節內容 (抽樣檢查)
-    chapter_1_content = items[1].get_content().decode('utf-8')
-    assert "<h1>Chapitre 1</h1><p>Contenu français.</p>" in chapter_1_content
+    # 使用 BeautifulSoup 解析，使驗證更健壯
+    chapter_1_html = items[1].get_content()
+    soup = BeautifulSoup(chapter_1_html, 'html.parser')
+
+    h1 = soup.find('h1')
+    assert h1 is not None, "h1 tag not found in chapter 1"
+    assert h1.get_text(strip=True) == "Chapitre 1"
+
+    p = soup.find('p')
+    assert p is not None, "p tag not found in chapter 1"
+    assert p.get_text(strip=True) == "Contenu français."

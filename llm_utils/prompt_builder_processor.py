@@ -5,7 +5,7 @@ from workflows.parts import TranslationRequestPart, ApiRequestPart
 from .prompt_builder import PromptBuilder
 
 
-class PromptBuilderProcessor(processor.Processor):
+class PromptBuilderProcessor(processor.PartProcessor):
     """一個根據翻譯請求構建 API 消息的處理器。"""
 
     def _determine_task_type(self, part: TranslationRequestPart) -> str:
@@ -22,34 +22,36 @@ class PromptBuilderProcessor(processor.Processor):
         # 可以添加一個默認或錯誤處理
         raise ValueError(f"無法從 ID '{task_id}' 確定任務類型。")
 
-    async def call(self, stream):
-        async for part in stream:
-            if not isinstance(part, TranslationRequestPart):
-                continue
+    def match(self, part: processor.ProcessorPart) -> bool:
+        """只處理 TranslationRequestPart。"""
+        return isinstance(part, TranslationRequestPart)
 
-            try:
-                # 1. 確定任務類型
-                task_type = self._determine_task_type(part)
+    async def call(self, part: TranslationRequestPart):
+        """處理單�� TranslationRequestPart。"""
+        try:
+            # 1. 確定任務類型
+            task_type = self._determine_task_type(part)
 
-                # 2. 實例化 PromptBuilder
-                builder = PromptBuilder(
-                    source_lang=part.source_lang,
-                    target_lang=part.target_lang
-                    # 在這裡可以選擇性地傳入術語表 (glossary)
-                )
+            # 2. 實例化 PromptBuilder
+            builder = PromptBuilder(
+                source_lang=part.source_lang,
+                target_lang=part.target_lang
+                # 在這裡可以選擇性地傳入術語表 (glossary)
+            )
 
-                # 3. 構建消息
-                messages = builder.build_messages(
-                    task_type=task_type,
-                    task_string=part.text_to_translate
-                )
+            # 3. 構建消息
+            messages = builder.build_messages(
+                task_type=task_type,
+                task_string=part.text_to_translate
+            )
 
-                # 4. 產��包含 API 請求和原始元數據的 Part
-                yield ApiRequestPart(
-                    messages=messages,
-                    metadata=part.metadata
-                )
+            # 4. 產出包含 API 請求和原始元數據的 Part
+            yield ApiRequestPart(
+                messages=messages,
+                metadata=part.metadata
+            )
 
-            except (ValueError, KeyError) as e:
-                # 在實際應用中，可以產生一個 ErrorPart
-                print(f"處理任務時出錯 (metadata: {part.metadata}): {e}")
+        except (ValueError, KeyError) as e:
+            # 在實際應用中，可以產生一個 ErrorPart
+            print(f"處理任務時出錯 (metadata: {part.metadata}): {e}")
+            yield part

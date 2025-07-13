@@ -10,7 +10,7 @@ from .gemini_client import GeminiClient
 from .base_client import BaseLLMClient
 
 
-class TranslatorProcessor(processor.Processor):
+class TranslatorProcessor(processor.PartProcessor):
     """
     一個接收 API 請求、調用 LLM 進行翻譯，並輸出翻譯結果的處理器。
     """
@@ -37,8 +37,16 @@ class TranslatorProcessor(processor.Processor):
             # 重新引發異常，以便工作流可以捕獲它
             raise
 
-    async def _translate_task(self, part: ApiRequestPart) -> TranslatedTextPart:
-        """執行單個翻譯任務的核心邏輯。"""
+    def match(self, part: processor.ProcessorPart) -> bool:
+        """只處理 ApiRequestPart。"""
+        return isinstance(part, ApiRequestPart)
+
+    async def call(self, part: ApiRequestPart):
+        """處理單個 ApiRequestPart。"""
+        # 確保客戶端已初始化
+        if not self._is_initialized:
+            await self.initialize()
+
         async with self.semaphore:
             task_id = part.metadata.get("llm_processing_id", "N/A")
             self.logger.info(f"正在處理任務 (ID: {task_id})...")
@@ -54,7 +62,7 @@ class TranslatorProcessor(processor.Processor):
                 source_text = part.metadata.get("source_text", "")
 
                 # 創建並返回包含結果的 Part
-                return TranslatedTextPart(
+                yield TranslatedTextPart(
                     translated_text=response_text,
                     source_text=source_text, # 傳遞原始文本
                     metadata=part.metadata
@@ -63,28 +71,34 @@ class TranslatorProcessor(processor.Processor):
             except Exception as e:
                 self.logger.error(f"任務 {task_id} 在 API 調用中遇到異常: {e}", exc_info=True)
                 # 在失敗時，也創建一個 Part，但可能包含錯誤信息
-                return TranslatedTextPart(
+                yield TranslatedTextPart(
                     translated_text=f"[TRANSLATION_FAILED]: {e}",
                     source_text=part.metadata.get("source_text", ""),
                     metadata=part.metadata
                 )
 
-    async def call(self, stream):
-        """處理傳入的 ApiRequestPart 流。"""
-        # 在處理第一個 part 之前確保客戶端已初始化
-        if not self._is_initialized:
-            await self.initialize()
 
-        # 創建一組並發執行的翻譯任務
-        translation_tasks = []
-        async for part in stream:
-            if isinstance(part, ApiRequestPart):
-                # 為每個 part 創建一個協程任務
-                task = asyncio.create_task(self._translate_task(part))
-                translation_tasks.append(task)
+class SimpleTranslator(processor.Processor):
+    """
+    一個簡化的翻譯器，直接接收 TranslationRequestPart，
+    內部完成提示構建和翻譯。
+    """
+    def __init__(self, client: Optional[BaseLLMClient] = None):
+        super().__init__()
+        self.logger = logging.getLogger(__name__)
+        self.prompt_builder = PromptBuilderProcessor()
+        self.translator = TranslatorProcessor(client=client)
+
+    async def call(self, stream):
+        # 1. 將 TranslationRequestPart 轉換為 ApiRequestPart
+        # 因為 prompt_builder 現在是 PartProcessor，我們需要用 to_processor()
+        api_request_stream = self.prompt_builder.to_processor()(stream)
         
-        # 等待所有翻譯任務完成
-        for task in asyncio.as_completed(translation_tasks):
-            # 當任務完成時，獲取結果並將其傳遞下去
-            result_part = await task
-            yield result_part
+        # 2. 將 ApiRequestPart 傳遞給翻��器
+        # 同樣，translator 現在也是 PartProcessor
+        translated_stream = self.translator.to_processor()(api_request_stream)
+        
+        # 3. 產出結果
+        async for result in translated_stream:
+            yield result
+

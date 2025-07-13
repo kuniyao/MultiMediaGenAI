@@ -1,6 +1,6 @@
 # `genai-processors` 重構計劃
 
-**最後更新**: 2025-07-12
+**最後更新**: 2025-07-13
 
 ## 1. 重構目標 (The "Why")
 
@@ -36,46 +36,49 @@
 ### 階段 2: “單文件翻譯”工作流重構
 
 *   [x] **重構數據源**: 修改 `data_sources/local_file_source.py`。
-    *   **任務**: 創建一個 `LocalFileSource(Processor)`，它接收 `TranslationRequestPart`，讀取文件內容，並輸出一個新的、包含了文件內容的 `TranslationRequestPart`。
     *   **驗證**: 為這個新的處理器編寫單元測試並通過。
 *   [x] **重構提示產生器**: 修改 `llm_utils/prompt_builder_processor.py`。
-    *   **任務**: 創建一個 `PromptBuilderProcessor(Processor)`，它接收 `TranslationRequestPart`，並輸出 `ApiRequestPart`。
     *   **驗證**: 為這個新的處理器編寫單元測試並通過。
 *   [x] **重構翻譯器**: 修改 `llm_utils/translator.py`。
-    *   **任務**: 創建一個 `TranslatorProcessor(Processor)`，它接收 `ApiRequestPart`，輸出 `TranslatedTextPart`。
-    *   **驗證**: 為這個新的處理���編寫單元測試並通過。
+    *   **驗證**: 為這個新的處理器編寫單元測試並通過。
 *   [x] **重構文件寫入器**: 修改 `processors/subtitle/file_write_processor.py`。
-    *   **任務**: 創建一個 `FileWriterProcessor(Processor)`，它接收 `TranslatedTextPart`，並將內容寫入磁盤。
     *   **驗證**: 為這個新的處理器編寫單元測試並通過。
 *   [x] **組裝管道**: 修改 `translate.py`。
-    *   **任務**: 使用 `+` 運算符將上述處理器連接成一個完整的管道。
     *   **驗證**: 從命令行成功執行一次端到端的文件翻譯，生成正確的輸出文件。
 
-### 階段 3: EPUB 工作流重構
+### 階段 3: EPUB 工作流重構 (新方案)
+
+**核心思路**: 新的工作流將復用 `format_converters` 中成熟的 HTML 解析與構建邏輯。數據流將在結構化的 `Block` 對象和純文本之間轉換，從而避免讓 LLM 直接處理複雜的 HTML，根除 XML 格式錯誤。
 
 *   [x] **建立 EPUB 工作流模組**: 創建 `workflows/book/` 目錄。
-    *   **任務**: 在 `workflows/book/` 中建立 `parts.py` 和 `processors.py` 檔案。
     *   **驗證**: 目錄和檔案結構已建立。
-*   [x] **定義 EPUB 相關的 `Parts`**: 在 `workflows/book/parts.py` 中定義 EPUB 工作流程所需的 `Part`，例如 `EpubBookPart`, `ChapterPart`, `TranslatedBookPart`。
-    *   **驗證**: 新的 `Part` 已被定義，並包含必要的屬性。
-*   [x] **重構 EPUB 剖析器**: 修改 `processors/book/epub_parsing_processor.py`。
-    *   **任務**: 創建一個 `EpubParsingProcessor(Processor)`，它接收 `TranslationRequestPart`，剖析 EPUB 檔案，並輸出一個 `EpubBookPart`。
-    *   **驗���**: 為這個新的處理器編寫單元測試並通過。
-*   [x] **重構章節擷取器**: 修改 `processors/book/chapter_extraction_processor.py`。
-    *   **任務**: 創建一個 `ChapterExtractionProcessor(Processor)`，它接收 `EpubBookPart`，並為書中的每一個章節，產生一個 `ChapterPart`。
-    *   **驗證**: 為這個新的處理器編寫單元測試並通過。
-*   [x] **創建 "適配器" 處理器**: 在 `workflows/book/processors.py` 中創建一個 `ChapterToTranslationRequestProcessor`。
-    *   **任務**: 這個處理器的功能是將 `ChapterPart` 轉換為 `TranslationRequestPart`，以串聯現有的翻譯流程。
-    *   **驗證**: 為這個新的處理器編寫單元測試並通過。
-*   [x] **重構書籍建構器**: 修改 `processors/book/book_build_processor.py`。
-    *   **任務**: 創建一個 `BookBuildProcessor(Processor)`，它接收 `TranslatedTextPart` (由 `TranslatorProcessor` 產生)，將所有翻譯完的章節組裝成一本完整的、翻譯後的書籍，並輸出一個 `TranslatedBookPart`。
-    *   **驗證**: 為這個新的處理器編寫單元測試並通過。
-*   [ ] **重構 EPUB 寫入器**: 修改 `processors/book/epub_writing_processor.py`。
-    *   **任務**: 創建一個 `EpubWritingProcessor(Processor)`，它接收 `TranslatedBookPart`，並將其寫入為��個 `.epub` 檔案。
-    *   **驗證**: 為這個新的處理器編寫單元測試並通過。
-    *   **狀態**: **遇到阻礙**。`EpubWritingProcessor` 的單元測試持續失敗。在使用 `ebooklib` 建立 EPUB 時，章節順序和內容驗證出現問題。即使切換到手動建立 ZIP 檔案的方式，測試仍然無法通過。需要重新評估 EPUB 的生成和驗證策略。
-*   [ ] **組裝 EPUB 管道**: 在 `translate.py` 中，為 `.epub` 檔案建立一個新的工作流程分支，並使用 `+` 和 `//` (如果適用) 來組裝所有 EPUB 相關的處理器。
-    *   **驗證**: 從命令行成功執行一次端到端的 EPUB 翻譯，生成正確的輸出檔案。
+*   [x] **定義 EPUB 相關的 `Parts`**: 在 `workflows/book/parts.py` 中定義 `EpubBookPart`, `ChapterPart`, `TranslatedChapterPart`, `TranslatedBookPart`。
+    *   **驗證**: 所有 `Part` 已被定義，並包含必要的屬性（例如 `ChapterPart` 包含一個結構化的 `Chapter` 對象）。
+*   [x] **重構 EPUB 剖析器 (`EpubParsingProcessor`)**:
+    *   **任務**: 確保處理器調用 `epub_parser.to_book()`，並輸出一個包含完整結構化 `Book` 對象的 `EpubBookPart`。
+    *   **驗證**: 單元測試確認，給定一個 EPUB 路徑，處理器能輸出一個 `EpubBookPart`，且其 `book` 屬性是一個有效的 `Book` 對象。
+*   [x] **重構章節擷取器 (`ChapterExtractionProcessor`)**:
+    *   **任務**: 迭代 `EpubBookPart` 中的 `book.chapters` 列表，為每個 `Chapter` 對象產出一個 `ChapterPart`。
+    *   **驗證**: 單元測試確認，處理器能為書中的每一章都產出一個 `ChapterPart`，且每個 `Part` 都包含原始的、未經修改的 `Chapter` 對象。
+*   [x] **創建 HTML 序列化處理器 (`ChapterToHtmlProcessor`)**:
+    *   **任務**: 創建一個新的 `PartProcessor`，它接收 `ChapterPart`，調用 `html_mapper` 將 `Chapter` 對象的內容轉換為一個乾淨的 HTML 字符串，並輸出 `TranslationRequestPart`。
+    *   **驗證**: 單元測試確認，給定一個包含 `Chapter` 對象的 `ChapterPart`，處理器能輸出一個 `TranslationRequestPart`，其 `text_to_translate` 屬性是預期中的 HTML 字符串。
+*   [x] **創建 HTML 反序列化處理器 (`HtmlToChapterProcessor`)**:
+    *   **任務**: 它接收 `TranslatedTextPart`，先對 LLM 返回的原始字符串進行清理，然後調用 `html_mapper.html_to_blocks()` 將乾淨的 HTML 字符串解析回 `Block` 對象列表，最後輸出一個包含新的、已翻譯 `Chapter` 對象的 `TranslatedChapterPart`。
+    *   **驗證**: 單元測試確認，給定一個包含模擬 LLM 輸出的 `TranslatedTextPart`，處理器能成功清理並解析，最終輸出一個包含正確 `Block` 結構的 `TranslatedChapterPart`。
+*   [x] **重構書籍建構器 (`BookBuildProcessor`)**:
+    *   **任務**: 修改為一個 `Processor`，它接收 `TranslatedChapterPart` 的數據流，從每個 `Part` 中提取出已翻譯的 `Chapter` 對象，在流結束時將它們組裝成一個完整的 `Book` 對象，並輸出單一的 `TranslatedBookPart`。
+    *   **驗證**: 單元測試確認，在接收完一系列 `TranslatedChapterPart` 後，處理器能輸出一個 `TranslatedBookPart`，且其包含的 `Book` 對象中包含了所有預期的、已翻譯的章節。
+*   [x] **重構 EPUB 寫入器 (`EpubWritingProcessor`)**:
+    *   **任務**: 修改為一個 `Processor`，它接收 `TranslatedBookPart`，從中提取出 `Book` 對象，並直接將其傳遞給 `format_converters.epub_writer.book_to_epub()` 函數來生成最終的 `.epub` 文件。
+    *   **驗證**: 單元測試確認，處理器在接收到 `TranslatedBookPart` 後，會使用正確的 `Book` 對象調用 `book_to_epub()` 函數。
+*   [x] **組裝 EPUB 管道 (新)**:
+    *   **任務**: 在 `translate.py` 中，按照新的邏輯組裝 EPUB 工作流。其核心將是 `(ChapterToHtmlProcessor + ... + HtmlToChapterProcessor).to_processor()` 的並行處理鏈。
+    *   **驗證**: 從命令行成功執行一次端到端的 EPUB 翻譯 (`python translate.py ...`)。
+    *   **當前狀態 (2025-07-13)**: 
+        *   端到端流程可以成功運行完畢，不再因 `TypeError` 或 `ValidationError` 而崩潰。
+        *   已成功修復了 `image_resources` 上下文丟失的問題。
+        *   **當前問題**: 運行時，`html_mapper` 會打印出多條關於圖片路徑不規範的警告 (例如: `警告: 图片 '../images/...' 的路径不规范。已通过文件名匹配修正为 -> 'OEBPS/images/...'`)。雖然程序可以成功修正並完成流程，但這些警告表明在 HTML 的序列化和反序列化過程中，路徑的相對性處理仍有待完善。這是後續需要解決的核心問題。
 
 ### 階段 4: YouTube 工作流重構 (待辦)
 

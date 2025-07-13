@@ -1,13 +1,14 @@
 import logging
-from ebooklib import epub
 from genai_processors import processor
 from workflows.parts import TranslationRequestPart
 from workflows.book.parts import EpubBookPart
+# 導入項目自有的 epub 解析器
+from format_converters.epub_parser import epub_to_book
 
 class EpubParsingProcessor(processor.Processor):
     """
-    一個接收 TranslationRequestPart，剖析其路徑指向的 EPUB 文件，
-    並輸出一個 EpubBookPart 的處理器。
+    一個接收 TranslationRequestPart，調用項目自有的解析器來處理 EPUB 文件，
+    並輸出一個包含結構化 Book 對象的 EpubBookPart 的處理器。
     """
     def __init__(self):
         self.logger = logging.getLogger(__name__)
@@ -26,42 +27,18 @@ class EpubParsingProcessor(processor.Processor):
             self.logger.info(f"Starting EPUB parsing for: {epub_path}")
 
             try:
-                # 使用 ebooklib 直接讀取和剖析 EPUB 文件
-                book = epub.read_epub(epub_path)
-
-                # 提取元數據
-                title = "Untitled"
-                if book.get_metadata('DC', 'title'):
-                    title = book.get_metadata('DC', 'title')[0][0]
-
-                author = "Unknown Author"
-                if book.get_metadata('DC', 'creator'):
-                    author = book.get_metadata('DC', 'creator')[0][0]
-
-                # 提取章節，並過濾掉非內容文件 (如導航頁)
-                chapters = []
-                # 獲取書脊中定義的內容順序
-                spine_ids = [item[0] for item in book.spine]
+                # 使用項目中已有的、更強大的解析器
+                book_object = epub_to_book(epub_path, self.logger)
                 
-                for item in book.get_items_of_type(9): # 9 is a magic number for XHTML
-                    # 只有在書脊中，並且不是導航文件的項目，才被視為章節
-                    if item.get_id() in spine_ids and 'nav' not in item.get_name():
-                        chapters.append({
-                            "id": item.get_id(),
-                            "file_name": item.get_name(),
-                            "content": item.get_content().decode('utf-8', 'ignore')
-                        })
-                
-                self.logger.info(f"Successfully parsed EPUB. Title: '{title}'. Found {len(chapters)} chapters.")
+                self.logger.info(f"Successfully parsed EPUB. Title: '{book_object.metadata.title_source}'.")
 
-                # 產生包含書籍資訊的 Part
+                # 產生包含完整 Book 對象的 Part
                 yield EpubBookPart(
-                    title=title,
-                    author=author,
-                    chapters=chapters,
+                    book=book_object,
                     metadata=part.metadata # 傳遞原始的元數據
                 )
 
             except Exception as e:
                 self.logger.error(f"EPUB parsing failed for {epub_path}: {e}", exc_info=True)
-                # 在這裡可以選擇產生一個 ErrorPart
+                # 可以在這裡重新拋出異常，以終止整個工作流
+                # raise
