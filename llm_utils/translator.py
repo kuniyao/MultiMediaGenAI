@@ -15,6 +15,7 @@ class TranslatorProcessor(processor.PartProcessor):
     """
     一個多功能翻譯器，它接收不同類型的翻譯任務Part，
     為其構建合適的提示，調用LLM進行翻譯，並輸出翻譯結果。
+    【新】: 它還會將所有成功的翻譯結果緩存起來，供其他處理器查詢。
     """
 
     def __init__(self, client: Optional[BaseLLMClient] = None, concurrency_limit: int = 5):
@@ -23,6 +24,7 @@ class TranslatorProcessor(processor.PartProcessor):
         self.client = client or GeminiClient(logger=self.logger)
         self.semaphore = asyncio.Semaphore(concurrency_limit)
         self._is_initialized = False
+        self.llm_responses: list[TranslatedTextPart] = [] # 【新】增加緩存列表
 
     async def initialize(self):
         """異步初始化底層的 LLM 客戶端。"""
@@ -55,14 +57,14 @@ class TranslatorProcessor(processor.PartProcessor):
         if isinstance(part, BatchTranslationTaskPart):
             task_type = 'json_batch'
             text_to_translate = part.json_string
-            self.logger.info(f"接收到批處理任務，包含 {part.chapter_count} 個章節。")
+            self.logger.debug(f"Received batch task with {part.chapter_count} chapters.")
         elif isinstance(part, SplitChapterTaskPart):
             task_type = 'text_file' # 對於單個HTML塊，我們使用通用的文本文件提示
             text_to_translate = part.html_content
-            self.logger.info(f"接收到長章節切分任務: part #{part.part_number} for chapter '{part.original_chapter_id}'.")
+            self.logger.debug(f"Received split chapter task: part #{part.part_number} for chapter '{part.original_chapter_id}'.")
 
         if not text_to_translate.strip():
-            self.logger.warning(f"任務 {part.metadata.get('llm_processing_id')} 的輸入文本為空，跳過翻譯。")
+            self.logger.warning(f"Task input for {part.metadata.get('llm_processing_id')} is empty, skipping translation.")
             yield TranslatedTextPart(translated_text="", source_text="", metadata=part.metadata)
             return
 
@@ -89,7 +91,7 @@ class TranslatorProcessor(processor.PartProcessor):
             self.logger.error(f"任務在 API 調用中遇到異常: {e}", exc_info=True)
             translated_text = f"[TRANSLATION_FAILED]: {e}"
 
-        # 4. 產出統一的結果 Part，並【關鍵修復】手動構建完整的元數據
+        # 4. 產出統一的結果 Part
         output_metadata = part.metadata.copy() # 複製基礎元數據
         output_metadata['type'] = task_type    # 注入我們自己的類型
 
@@ -99,8 +101,13 @@ class TranslatorProcessor(processor.PartProcessor):
             output_metadata['part_number'] = part.part_number
             output_metadata['injected_heading'] = part.injected_heading
 
-        yield TranslatedTextPart(
+        result_part = TranslatedTextPart(
             translated_text=translated_text,
             source_text=text_to_translate,
             metadata=output_metadata
         )
+        
+        # 【新】將結果存入緩存
+        self.llm_responses.append(result_part)
+        
+        yield result_part

@@ -58,7 +58,7 @@ class ChapterPreparationProcessor(processor.Processor):
         處理傳入的數據流。這個處理器會消耗掉一個 EpubBookPart，
         然後產出多個新的任務 Part。
         """
-        self.logger.info(f"Target tokens per LLM chunk calculated: {self.target_token_per_chunk}")
+        self.logger.debug(f"Target tokens per LLM chunk calculated: {self.target_token_per_chunk}")
         
         async for part in stream:
             if not isinstance(part, EpubBookPart):
@@ -75,7 +75,7 @@ class ChapterPreparationProcessor(processor.Processor):
 
             for chapter_index, chapter in enumerate(book.chapters):
                 if not chapter.content:
-                    self.logger.info(f"Skipping chapter '{chapter.id}' as it has no content.")
+                    self.logger.warning(f"Skipping chapter '{chapter.id}' as it has no content.")
                     continue
                 
                 # 為塊分配臨時ID，以便修復流程（如果需要）
@@ -118,7 +118,7 @@ class ChapterPreparationProcessor(processor.Processor):
                         current_batch_payload = []
                         current_batch_tokens = 0
                     
-                    self.logger.info(f"Adding chapter '{chapter.id}' ({token_count} tokens) to current batch.")
+                    self.logger.debug(f"Adding chapter '{chapter.id}' ({token_count} tokens) to current batch.")
                     chapter_payload: Dict[str, Any] = {"id": chapter.id, "html_content": chapter_html}
                     if was_injected:
                         chapter_payload["injected_heading"] = True

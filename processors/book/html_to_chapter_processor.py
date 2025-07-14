@@ -37,6 +37,7 @@ class HtmlToChapterProcessor(processor.PartProcessor):
         """
         處理單個 TranslatedTextPart，將其 HTML 內容轉換回 Chapter 對象。
         """
+        self.logger.debug(f"Received TranslatedTextPart with metadata: {part.metadata}")
         source_metadata = part.metadata
         task_type = source_metadata.get("type")
 
@@ -44,7 +45,10 @@ class HtmlToChapterProcessor(processor.PartProcessor):
         if task_type == "json_batch":
             self.logger.info("Processing a batch translation result...")
             try:
-                cleaned_json_str = self._clean_html_content(part.translated_text)
+                raw_text = part.translated_text
+                self.logger.debug(f"Raw batch response from LLM: {raw_text[:500]}...") # Log first 500 chars
+                cleaned_json_str = self._clean_html_content(raw_text)
+                self.logger.debug(f"Cleaned JSON string for parsing: {cleaned_json_str[:500]}...")
                 translated_chapters_data = json.loads(cleaned_json_str)
                 
                 for chapter_data in translated_chapters_data:
@@ -79,7 +83,11 @@ class HtmlToChapterProcessor(processor.PartProcessor):
 
             self.logger.info(f"Processing a single/split chapter result for '{original_chapter_id}'...")
             
-            cleaned_html = self._clean_html_content(part.translated_text)
+            raw_html = part.translated_text
+            self.logger.debug(f"Raw single/split response from LLM: {raw_html[:500]}...")
+            cleaned_html = self._clean_html_content(raw_html)
+            self.logger.debug(f"Cleaned HTML for parsing: {cleaned_html[:500]}...")
+
             if cleaned_html and not cleaned_html.strip().startswith('<'):
                 self.logger.warning(f"Content for '{original_chapter_id}' appears to be plain text. Wrapping in <p> tags.")
                 cleaned_html = f"<p>{cleaned_html.strip()}</p>"
