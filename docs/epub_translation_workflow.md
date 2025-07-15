@@ -24,8 +24,9 @@ graph TD;
         P3["<b>4. TranslatorProcessor</b><br>翻译并缓存响应"]
         P4["<b>5. HtmlToChapterProcessor</b><br>将HTML转回章节"]
         P5["<b>6. BookBuildProcessor</b><br>重新组装书籍"]
-        P6["<b>7. OutputGenerationProcessor</b><br>生成所有输出文件"]
-        P7["<b>8. TempDirCleanupProcessor</b><br>清理临时文件"]
+        P6["<b>7. ArchiveProcessor</b><br>准备归档环境(目录, .jsonl)"]
+        P7["<b>8. EpubWriterProcessor</b><br>写入 .epub 文件"]
+        P8["<b>9. TempDirCleanupProcessor</b><br>清理临时文件"]
     end
 
     subgraph Output [输出]
@@ -42,10 +43,12 @@ graph TD;
     P3 -- "多个 TranslatedTextPart" --> P4;
     P4 -- "多个 TranslatedChapterPart" --> P5;
     P5 -- "TranslatedBookPart, EpubBookPart" --> P6;
-    P6 -- "TranslatedBookPart, EpubBookPart" --> P7;
+    P6 -- "Part + output_dir元数据" --> P7;
+    P7 -- "Part + output_dir元数据" --> P8;
     
     P3 -.-> P6;
-    P6 -- "写入磁盘" --> O1 & O2 & O3;
+    P7 -- "写入磁盘" --> O1;
+    P6 -- "写入磁盘" --> O2;
 ```
 *<p align="center">虚线表示 `OutputGenerationProcessor` 依赖 `TranslatorProcessor` 的实例来获取缓存数据。</p>*
 
@@ -53,7 +56,7 @@ graph TD;
 
 ## 处理器与数据流详解
 
-### 1. `LogSetupProcessor` (新)
+### 1. `LogSetupProcessor`
 
 -   **核心职责**: 工作流的“前哨”，在流程开始时，动态地为本次任务配置好专属的日志文件。
 -   **输入**: `TranslationRequestPart`。
@@ -118,22 +121,30 @@ graph TD;
     -   **【关键】** 将上游传入的 `EpubBookPart` **再次传递下去**，以供后续处理器使用。
 -   **涉及文件**: `processors/book/book_build_processor.py`
 
-### 7. `OutputGenerationProcessor` (新核心)
+### 7. `ArchiveProcessor`
 
--   **核心职责**: 工作流的“档案管理员”，负责将本次任务的所有最终产物（翻译稿、LLM原始响应）优雅地归档到磁盘。
--   **输入**:
-    -   `TranslatedBookPart`: 包含最终组装好的书籍对象。
-    -   `EpubBookPart`: 用于获取原始文件名等元数据。
-    -   一个 `TranslatorProcessor` 的**实例** (在构造时注入)。
--   **输出**: 在磁盘上写入多个文件。
--   **涉及文件**: `processors/book/output_gen_processor.py`, `processors/book/artifact_writers.py`
+-   **核心职责**: 通用的“归档管理员”，负责为本次任务准备归档环境，并写入所有与具体文件格式无关的通用过程产物。
+-   **输入**: 上游传来的任何 Part。
+-   **输出**: 一个增强了元数据的 Part（向下游传递）。
 -   **核心逻辑**:
-    -   在工作流结束时执行。
-    -   从 `TranslatedBookPart` 的元数据中获取原始文件名，并在 `GlobalWorkflowOutputs` 下创建专属的输出目录。
-    -   **策略模式**: 调用注入的 `EpubArtifactWriter`，将 `TranslatedBookPart` 中的 `Book` 对象写入为 `.epub` 文件。
-    -   **依赖注入**: 直接访问 `TranslatorProcessor` 实例的 `llm_responses` 缓存列表，将所有内容写入到 `llm_responses.jsonl` 文件中。
+    -   创建目录: 根据第一个到达的 Part 的元数据，在 GlobalWorkflowOutputs 下创建专属的、以原始文件名命名的输出目录。
+    -   写入通用日志: 通过依赖注入的方式，在创建时直接获取 TranslatorProcessor 的实例。访问其内部缓存的 llm_responses 列表，并将所有内容写入到上述目录中的 llm_responses.jsonl 文件。
+    -   注入路径: 将创建好的目录的绝对路径，添加到它所处理的 Part 的元数据中（例如 part.metadata["output_dir"] = "..."），以便下游的专用写入器知道应该在哪里保存文件。
+-   **涉及文件**: processors/common/archive_processor.py。
 
-### 8. `TempDirCleanupProcessor`
+### 8. `EpubWriterProcessor`
+
+-   **核心职责**: 专一的“EPUB写入专家”，只负责将内存中的 Book 对象写入为物理的 .epub 文件。
+-   **输入**: TranslatedBookPart。
+-   **输出**: 将接收到的 Part 原样传递下去。
+-   **核心逻辑**:
+    -   读取地址: 从上游 ArchiveProcessor 增强过的 TranslatedBookPart 元数据中，读取 output_dir 路径。
+    -   获取内容: 从 TranslatedBookPart 中解包出完整的、已翻译的 Book 对象。
+    -   写入文件: 调用 EpubArtifactWriter，将 Book 对象作为 .epub 文件，写入到 output_dir 指定的目录中。
+-   **涉及文件**: processors/book/epub_writer_processor.py, processors/book/artifact_writers.py。
+
+
+### 9. `TempDirCleanupProcessor`
 
 -   **核心职责**: 工作流的“清道夫”，负责清理第二步解压EPUB时创建的临时文件夹。
 -   **输入**: `EpubBookPart` (由 `BookBuildProcessor` 和 `OutputGenerationProcessor` 一路传递而来)。

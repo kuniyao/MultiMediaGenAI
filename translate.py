@@ -20,6 +20,8 @@ from processors.book.output_gen_processor import OutputGenerationProcessor
 from processors.book.artifact_writers import EpubArtifactWriter
 from processors.book.temp_dir_cleanup_processor import TempDirCleanupProcessor
 from processors.book.log_setup_processor import LogSetupProcessor # 【新】导入日志设置处理器
+from processors.common.archive_processor import ArchiveProcessor
+from processors.book.epub_writer_processor import EpubWriterProcessor
 # from processors.book.epub_writing_processor import EpubWritingProcessor # DEPRECATED
 # --- 结束导入 ---
 
@@ -43,27 +45,30 @@ def build_book_translation_workflow():
     log_setup_processor = LogSetupProcessor()
     epub_parsing_processor = EpubParsingProcessor()
     chapter_preparation_processor = ChapterPreparationProcessor()
-    translation_processor = TranslatorProcessor()
+    translation_processor = TranslatorProcessor() # 这个实例将被共享
     html_to_chapter_processor = HtmlToChapterProcessor()
     book_build_processor = BookBuildProcessor()
-    # 【新】将 translator 实例注入到 output_processor
-    output_processor = OutputGenerationProcessor(
-        artifact_writer=EpubArtifactWriter(),
-        translator=translation_processor
-    )
+    
+    # 【核心重构】
+    # 创建新的归档和写入处理器
+    # ArchiveProcessor 依赖 translator 来获取日志
+    archive_processor = ArchiveProcessor(translator=translation_processor)
+    # EpubWriterProcessor 是独立的专家
+    epub_writer_processor = EpubWriterProcessor()
+    
     temp_dir_cleanup_processor = TempDirCleanupProcessor()
 
-    # 2. 将所有处理器连接成一个管道
-    # The '+' operator is overloaded to chain processors.
+    # 2. 将所有处理器按照新的、更清晰的顺序连接成一个管道
     pipeline = (
-        log_setup_processor + # 【新】在最开始设置日志
+        log_setup_processor +
         epub_parsing_processor +
         chapter_preparation_processor +
         translation_processor +
         html_to_chapter_processor +
         book_build_processor +
-        output_processor +
-        temp_dir_cleanup_processor
+        archive_processor +           # 步骤1: 准备归档目录并写入通用日志
+        epub_writer_processor +       # 步骤2: 写入 EPUB 专用文件
+        temp_dir_cleanup_processor    # 步骤3: 清理临时文件
     )
     return pipeline
 
